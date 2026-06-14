@@ -37,6 +37,7 @@ from book_text import (
     split_into_tts_chunks,
 )
 from mp3_tags import tag_audiobook_section
+from book_format import format_epub_if_supported
 
 # Fix Windows console encoding for emoji/unicode
 if sys.platform == 'win32':
@@ -389,11 +390,12 @@ class QwenAudiobookConverter:
         return Path("cache/audio_chunks") / f"{hash_obj.hexdigest()}.wav"
 
     def extract_text_from_epub(self, file_path: Path) -> str:
-        """Extract text from EPUB with fallback methods"""
+        """Extract text from EPUB with structured formatting when supported."""
         methods = [
+            self._extract_epub_structured,
             self._extract_epub_ebooklib,
             self._extract_epub_zipfile,
-            self._extract_epub_manual
+            self._extract_epub_manual,
         ]
 
         for method in methods:
@@ -402,11 +404,23 @@ class QwenAudiobookConverter:
                 if text and text.strip():
                     self.logger.info(f"EPUB extraction successful: {len(text)} characters")
                     return text
+            except ValueError:
+                continue
             except Exception as e:
-                self.logger.warning(f"EPUB method failed: {e}")
+                self.logger.warning(f"EPUB method failed ({method.__name__}): {e}")
                 continue
 
         raise RuntimeError("All EPUB extraction methods failed")
+
+    def _extract_epub_structured(self, file_path: Path) -> str:
+        """Use semantic EPUB profiles (skips blurbs, TOC noise, back matter)."""
+        formatted = format_epub_if_supported(file_path)
+        if not formatted:
+            raise ValueError("No structured EPUB profile matched")
+        self.logger.info(
+            f"Structured EPUB formatting applied ({len(formatted.split()):,} words)"
+        )
+        return formatted
 
     def _extract_epub_ebooklib(self, file_path: Path) -> str:
         """Extract using ebooklib"""

@@ -36,7 +36,7 @@ FRONT_MATTER_TITLES = {
 }
 
 CHAPTER_TITLE_RE = re.compile(
-    r"(?i)^(?:part\s+\d+\s*:?\s*.+|chapter\s+\d+\.?\s*.+)$"
+    r"(?i)^(?:part\s+\d+\s*:?\s*.+|chapter\s+\d+[:.]?\s*.+)$"
 )
 
 
@@ -227,10 +227,23 @@ def _first_line(text: str) -> str:
     return text.split("\n", 1)[0].strip()
 
 
+def is_toc_artifact(text: str) -> bool:
+    """Long duplicated TOC/nav entries from raw EPUB HTML extraction."""
+    line = _first_line(text)
+    words = line.split()
+    if len(words) > 14:
+        return True
+    if line.count(",") >= 2 and len(line) > 55:
+        return True
+    return False
+
+
 def is_section_title(text: str) -> bool:
     """True when a text block begins a new audiobook track (chapter or equivalent)."""
     line = _first_line(text)
     if not line or line.lower().startswith("question:"):
+        return False
+    if is_toc_artifact(text):
         return False
     if CHAPTER_TITLE_RE.match(line):
         return True

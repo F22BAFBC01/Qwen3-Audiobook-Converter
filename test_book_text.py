@@ -51,9 +51,13 @@ def test_formatted_audiobook_sample():
 
 
 def test_audiobook_sections():
-    sample = Path(__file__).resolve().parent.parent / (
+    sample = Path(__file__).resolve().parent / "book_to_convert" / (
         "Set Boundaries, Find Peace - Nedra Glover Tawwab (audiobook).txt"
     )
+    if not sample.exists():
+        sample = Path(__file__).resolve().parent.parent / (
+            "Set Boundaries, Find Peace - Nedra Glover Tawwab (audiobook).txt"
+        )
     if not sample.exists():
         print("SKIP: audiobook sample not found")
         return
@@ -65,10 +69,33 @@ def test_audiobook_sections():
     assert sections[0].filename.startswith("01_")
     assert sections[1].title == "Introduction"
     assert any(s.title.startswith("Chapter 2") for s in sections)
+    assert all(s.title != "Opening" for s in sections)
+    assert all(s.title != "Commonly Asked Questions" for s in sections)
 
     print(f"Sections: {len(sections)}")
     for section in sections:
         print(f"  {section.track_number:02d} {section.filename} ({len(section.text.split())} words)")
+
+
+def test_structured_epub_matches_audiobook_sample():
+    """Structured EPUB output should match pre-formatted audiobook section split."""
+    epub_candidates = list(Path(__file__).resolve().parent.glob("book_to_convert/*.epub"))
+    epub_candidates += list(Path(__file__).resolve().parent.parent.glob("*Tawwab*.epub"))
+    if not epub_candidates:
+        print("SKIP: no Tawwab EPUB found for structured extract test")
+        return
+
+    from book_format import format_epub_if_supported
+
+    epub_path = epub_candidates[0]
+    formatted = format_epub_if_supported(epub_path)
+    assert formatted, "structured EPUB formatting failed"
+
+    sections = split_into_audiobook_sections(formatted)
+    assert sections[0].title == "Preface", sections[0].title
+    assert all(s.title != "Opening" for s in sections)
+    assert all(s.title != "Commonly Asked Questions" for s in sections)
+    print(f"Structured EPUB: {len(formatted.split()):,} words, {len(sections)} sections")
 
 
 def test_short_title_merged_for_tts():
@@ -97,5 +124,6 @@ if __name__ == "__main__":
     test_blank_line_pauses()
     test_formatted_audiobook_sample()
     test_audiobook_sections()
+    test_structured_epub_matches_audiobook_sample()
     test_short_title_merged_for_tts()
     print("OK")
