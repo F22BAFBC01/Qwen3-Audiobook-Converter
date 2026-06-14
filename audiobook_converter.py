@@ -93,7 +93,8 @@ VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
 # Processing Settings
 BOOKS_FOLDER = "book_to_convert"  # Input folder
 AUDIOBOOKS_FOLDER = "audiobooks"  # Output folder
-CHUNK_SIZE_WORDS_CUSTOM = 600
+# Custom voice: one Gradio call per ~500-char passage (Qwen API recommendation).
+CUSTOM_VOICE_MAX_CHUNK_CHARS = 500
 MAX_WORKERS = 1  # Keep at 1 to avoid rate limiting
 AUDIO_FORMAT = "mp3"
 AUDIO_BITRATE = "128k"
@@ -205,6 +206,8 @@ class QwenAudiobookConverter:
                 f"# API max_chunk_chars: {VOICE_CLONE_MAX_CHUNK_CHARS} | "
                 f"chunk_gap: {VOICE_CLONE_CHUNK_GAP}s"
             )
+        elif self.voice_mode == "custom_voice":
+            header_lines.append(f"# API max chunk chars: {CUSTOM_VOICE_MAX_CHUNK_CHARS}")
         path.write_text("\n".join(header_lines) + "\n\n" + text + "\n", encoding="utf-8")
         return path
 
@@ -437,7 +440,9 @@ class QwenAudiobookConverter:
         """Get cache path for text chunk"""
         instruct_key = self._instruct_for_speech_role(speech_role) if self.voice_mode == "custom_voice" else speech_role
         content = (
-            f"{text}_{self.voice_mode}_{instruct_key}_vc{VOICE_CLONE_MAX_CHUNK_CHARS}_g{VOICE_CLONE_CHUNK_GAP}_"
+            f"{text}_{self.voice_mode}_{instruct_key}_"
+            f"vc{VOICE_CLONE_MAX_CHUNK_CHARS}_g{VOICE_CLONE_CHUNK_GAP}_"
+            f"cc{CUSTOM_VOICE_MAX_CHUNK_CHARS}_"
             f"{CUSTOM_VOICE_SPEAKER if self.voice_mode == 'custom_voice' else Path(self.voice_clone_ref_audio).name if self.voice_clone_ref_audio else ''}"
         )
         hash_obj = hashlib.md5(content.encode())
@@ -621,16 +626,23 @@ class QwenAudiobookConverter:
         text = docx2txt.process(str(file_path))
         return clean_text_preserve_structure(text) if text else ""
 
-    def _chunk_size_words(self) -> int:
-        if self.voice_mode == "voice_clone":
-            return SYNTHESIS_MAX_WORDS
-        return CHUNK_SIZE_WORDS_CUSTOM
-
     def split_into_chunks(self, text: str, *, for_section: bool = False) -> List[TextChunk]:
         """Split structured text into TTS chunks with pause metadata."""
         if not text.strip():
             return []
-        return split_into_tts_chunks(text, max_words=self._chunk_size_words(), for_section=for_section)
+        if self.voice_mode == "voice_clone":
+            return split_into_tts_chunks(
+                text,
+                max_words=SYNTHESIS_MAX_WORDS,
+                max_chars=SYNTHESIS_MAX_CHARS,
+                for_section=for_section,
+            )
+        return split_into_tts_chunks(
+            text,
+            max_words=10_000,
+            max_chars=CUSTOM_VOICE_MAX_CHUNK_CHARS,
+            for_section=for_section,
+        )
 
     def combine_chunks(
         self,

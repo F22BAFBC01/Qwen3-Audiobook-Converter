@@ -415,7 +415,11 @@ def split_into_tts_chunks(
     for unit_text, pause_ms in group_blocks_for_synthesis(blocks, max_words, max_chars):
         unit_words = len(unit_text.split())
         if unit_words > max_words or len(unit_text) > max_chars:
-            for sub_index, sub_text in enumerate(split_block_into_chunks(unit_text, max_words)):
+            if len(unit_text) > max_chars:
+                sub_texts = split_text_for_voice_clone(unit_text, max_chars)
+            else:
+                sub_texts = split_block_into_chunks(unit_text, max_words)
+            for sub_index, sub_text in enumerate(sub_texts):
                 chunks.append(
                     TextChunk(
                         text=sub_text,
