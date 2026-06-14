@@ -1,5 +1,19 @@
 # 🎧 Qwen Audiobook Converter
 
+> ## ⚠️ Fork notice — read before using
+>
+> **This is a modified fork** of [WhiskeyCoder/Qwen3-Audiobook-Converter](https://github.com/WhiskeyCoder/Qwen3-Audiobook-Converter). It is **not** the upstream project and **may contain bugs** introduced during customization.
+>
+> **What changed in this fork (high level):**
+>
+> - **Audiobook-oriented text handling** — preserves paragraph/chapter blank lines and inserts silence at those boundaries (instead of flattening all whitespace).
+> - **One MP3 per section** — ACX-style numbered chapter files in `audiobooks/<book title>/`, with ID3 track metadata (`mutagen`).
+> - **Structured EPUB extraction** — semantic parsing for supported books (e.g. *Set Boundaries, Find Peace*, *Adult Children of Emotionally Immature Parents*) to skip blurbs, TOC noise, and back matter; generic EPUB fallback remains.
+> - **Smaller TTS chunks** for voice clone, title/section delivery tweaks, and narration `instruct` strings for custom voice mode.
+> - **New modules:** `book_text.py`, `book_format.py`, `mp3_tags.py`.
+>
+> If something breaks, compare against upstream or [open an issue](https://github.com/F22BAFBC01/Qwen3-Audiobook-Converter/issues) on this fork. For the original behavior, use the upstream repo.
+
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Qwen](https://img.shields.io/badge/Powered%20by-Qwen%20Voice-orange.svg)](https://github.com/QwenLM/Qwen3-TTS)
