@@ -34,6 +34,7 @@ from book_text import (
     SYNTHESIS_MAX_WORDS,
     TextChunk,
     clean_text_preserve_structure,
+    sanitize_section_filename,
     split_into_audiobook_sections,
     split_into_tts_chunks,
 )
@@ -97,6 +98,7 @@ MAX_WORKERS = 1  # Keep at 1 to avoid rate limiting
 AUDIO_FORMAT = "mp3"
 AUDIO_BITRATE = "128k"
 MIN_DELAY_BETWEEN_CHUNKS = 1  # Reduced delay
+DIAGNOSTICS_FOLDER = "diagnostic"
 
 # Optional imports with fallbacks
 try:
@@ -153,9 +155,58 @@ class QwenAudiobookConverter:
 
     def setup_directories(self):
         """Create necessary directories"""
-        directories = [BOOKS_FOLDER, AUDIOBOOKS_FOLDER, "chunks", "cache/audio_chunks", "logs"]
+        directories = [BOOKS_FOLDER, AUDIOBOOKS_FOLDER, "chunks", "cache/audio_chunks", "logs", DIAGNOSTICS_FOLDER]
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
+
+    def clean_diagnostics_folder(self) -> None:
+        """Remove prior API text dumps (fresh run or after successful conversion)."""
+        diag = Path(DIAGNOSTICS_FOLDER)
+        diag.mkdir(parents=True, exist_ok=True)
+        for child in diag.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError as exc:
+                self.logger.warning(f"Failed to remove diagnostic path {child}: {exc}")
+
+    def _diagnostics_section_dir(self, book_title: str, section: AudiobookSection) -> Path:
+        book_dir = Path(DIAGNOSTICS_FOLDER) / sanitize_section_filename(book_title)
+        section_dir = book_dir / f"{section.track_number:02d}_{sanitize_section_filename(section.title)}"
+        section_dir.mkdir(parents=True, exist_ok=True)
+        return section_dir
+
+    def write_api_text_diagnostic(
+        self,
+        *,
+        book_title: str,
+        section: AudiobookSection,
+        total_sections: int,
+        chunk_num: int,
+        total_chunks: int,
+        text: str,
+        speech_role: str,
+        pause_before_ms: int = 0,
+    ) -> Path:
+        """Write the exact target_text sent to the Qwen API for one synthesis unit."""
+        section_dir = self._diagnostics_section_dir(book_title, section)
+        path = section_dir / f"unit_{chunk_num:03d}_of_{total_chunks:03d}.txt"
+        header_lines = [
+            f"# Book: {book_title}",
+            f"# Section {section.track_number}/{total_sections}: {section.title}",
+            f"# Synthesis unit {chunk_num}/{total_chunks}",
+            f"# Words: {len(text.split())} | Chars: {len(text)} | Pause before: {pause_before_ms}ms",
+            f"# Speech role: {speech_role} | Voice mode: {self.voice_mode}",
+        ]
+        if self.voice_mode == "voice_clone":
+            header_lines.append(
+                f"# API max_chunk_chars: {VOICE_CLONE_MAX_CHUNK_CHARS} | "
+                f"chunk_gap: {VOICE_CLONE_CHUNK_GAP}s"
+            )
+        path.write_text("\n".join(header_lines) + "\n\n" + text + "\n", encoding="utf-8")
+        return path
 
     def load_transcript(self, transcript_path: str) -> str:
         """Load transcript text from a file (any extension, treated as plain text)."""
@@ -696,11 +747,26 @@ class QwenAudiobookConverter:
             f"{'=' * 50}"
         )
 
-        chunk_args = [(i + 1, chunk.text, chunk.speech_role) for i, chunk in enumerate(chunks)]
+        chunk_args = [
+            (i + 1, chunk.text, chunk.speech_role, chunk.pause_before_ms)
+            for i, chunk in enumerate(chunks)
+        ]
         chunk_pauses = [chunk.pause_before_ms for chunk in chunks]
         results: Dict[int, bool] = {}
 
-        for chunk_num, chunk_text, speech_role in chunk_args:
+        for chunk_num, chunk_text, speech_role, pause_before_ms in chunk_args:
+            diag_path = self.write_api_text_diagnostic(
+                book_title=book_title,
+                section=section,
+                total_sections=total_sections,
+                chunk_num=chunk_num,
+                total_chunks=total_chunks,
+                text=chunk_text,
+                speech_role=speech_role,
+                pause_before_ms=pause_before_ms,
+            )
+            if chunk_num == 1:
+                print(f"[INFO] API text diagnostics -> {diag_path.parent.parent}/")
             try:
                 result = self.process_chunk_with_retry((chunk_num, chunk_text, speech_role))
                 results[chunk_num] = result
@@ -850,6 +916,8 @@ class QwenAudiobookConverter:
 
         print(f"[INFO] Found {len(book_files)} books to convert")
 
+        self.clean_diagnostics_folder()
+
         # Convert each book
         results = {}
         for book_file in book_files:
@@ -858,6 +926,7 @@ class QwenAudiobookConverter:
                 results[book_file.name] = success
             except KeyboardInterrupt:
                 print("\n[WARNING] Conversion interrupted by user")
+                print(f"[INFO] API text diagnostics kept in: {DIAGNOSTICS_FOLDER}/")
                 break
             except Exception as e:
                 self.logger.error(f"Unexpected error: {e}")
@@ -879,6 +948,12 @@ class QwenAudiobookConverter:
 
         if successful > 0:
             print(f"\n[INFO] Audiobook sections saved to: {AUDIOBOOKS_FOLDER}/<book title>/")
+
+        if total > 0 and successful == total:
+            self.clean_diagnostics_folder()
+            print(f"[INFO] Diagnostics cleaned after successful conversion")
+        elif successful < total:
+            print(f"[INFO] API text diagnostics kept in: {DIAGNOSTICS_FOLDER}/")
 
 
 def main():
