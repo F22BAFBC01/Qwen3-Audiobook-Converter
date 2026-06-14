@@ -44,6 +44,7 @@ CHAPTER_TITLE_RE = re.compile(
 class TextChunk:
     text: str
     pause_before_ms: int = 0
+    speech_role: str = "body"  # "body" or "section_title"
 
 
 @dataclass(frozen=True)
@@ -196,20 +197,26 @@ def split_block_into_chunks(block_text: str, max_words: int) -> list[str]:
     return [chunk for chunk in chunks if chunk.strip()]
 
 
-def split_into_tts_chunks(text: str, max_words: int) -> list[TextChunk]:
+def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = False) -> list[TextChunk]:
     """Split structured audiobook text into TTS chunks with pause metadata."""
+    if for_section:
+        text = prepare_section_text_for_tts(text)
+
     blocks = parse_text_blocks(text)
     if not blocks and text.strip():
         blocks = [(text.strip(), 0)]
 
     chunks: list[TextChunk] = []
     for block_text, pause_ms in blocks:
+        is_title_block = is_section_title(block_text) and not is_short_section_title(block_text)
         sub_chunks = split_block_into_chunks(block_text, max_words)
         for index, sub_chunk in enumerate(sub_chunks):
+            speech_role = "section_title" if is_title_block and index == 0 else "body"
             chunks.append(
                 TextChunk(
                     text=sub_chunk,
                     pause_before_ms=pause_ms if index == 0 else 0,
+                    speech_role=speech_role,
                 )
             )
 
@@ -244,6 +251,55 @@ def is_section_title(text: str) -> bool:
 def extract_section_title(text: str) -> str:
     line = _first_line(text).rstrip(".")
     return line or "Section"
+
+
+def is_short_section_title(text: str, max_words: int = 6) -> bool:
+    """Short standalone titles (e.g. 'Preface.') need merging for stable TTS delivery."""
+    if not is_section_title(text):
+        return False
+    return len(_first_line(text).split()) <= max_words
+
+
+def coalesce_short_title_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """
+    Merge brief section titles into the following paragraph.
+
+    Single-word headings sent alone to TTS often get unstable pitch and pacing.
+    """
+    if len(blocks) < 2:
+        return blocks
+
+    first_text, first_pause = blocks[0]
+    if not is_short_section_title(first_text):
+        return blocks
+
+    second_text, _second_pause = blocks[1]
+    merged = f"{first_text.rstrip()} {second_text.lstrip()}"
+    return [(merged, first_pause)] + blocks[2:]
+
+
+def blocks_to_text(blocks: list[tuple[str, int]]) -> str:
+    """Rebuild structured text from parsed blocks (blank line between blocks)."""
+    parts: list[str] = []
+    for block_text, pause_ms in blocks:
+        if parts:
+            blank_lines = 1
+            if pause_ms >= PAUSE_MAJOR_MS:
+                blank_lines = 3
+            elif pause_ms >= PAUSE_SECTION_MS:
+                blank_lines = 2
+            parts.append("\n" * blank_lines)
+        parts.append(block_text)
+    return "".join(parts)
+
+
+def prepare_section_text_for_tts(section_text: str) -> str:
+    """Apply section-level text normalizations before TTS chunking."""
+    blocks = parse_text_blocks(section_text)
+    if not blocks:
+        return section_text
+    blocks = coalesce_short_title_blocks(blocks)
+    return blocks_to_text(blocks)
 
 
 def sanitize_section_filename(title: str) -> str:

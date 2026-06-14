@@ -8,6 +8,7 @@ from book_text import (
     PAUSE_PARAGRAPH_MS,
     PAUSE_SECTION_MS,
     parse_text_blocks,
+    prepare_section_text_for_tts,
     split_into_audiobook_sections,
     split_into_tts_chunks,
 )
@@ -70,8 +71,31 @@ def test_audiobook_sections():
         print(f"  {section.track_number:02d} {section.filename} ({len(section.text.split())} words)")
 
 
+def test_short_title_merged_for_tts():
+    sample = Path(__file__).resolve().parent.parent / (
+        "Set Boundaries, Find Peace - Nedra Glover Tawwab (audiobook).txt"
+    )
+    if not sample.exists():
+        print("SKIP: audiobook sample not found")
+        return
+
+    text = sample.read_text(encoding="utf-8")
+    sections = split_into_audiobook_sections(text)
+    preface = sections[0]
+    prepared = prepare_section_text_for_tts(preface.text)
+    chunks = split_into_tts_chunks(prepared, max_words=300, for_section=False)
+
+    assert chunks, "expected chunks"
+    first = chunks[0].text
+    assert first != "Preface.", f"short title should be merged, got: {first!r}"
+    assert first.startswith("Preface."), first
+    assert "My life before" in first or len(first.split()) > 5, first
+    print(f"Preface opener chunk: {first[:100]}...")
+
+
 if __name__ == "__main__":
     test_blank_line_pauses()
     test_formatted_audiobook_sample()
     test_audiobook_sections()
+    test_short_title_merged_for_tts()
     print("OK")

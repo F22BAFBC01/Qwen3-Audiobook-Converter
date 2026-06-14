@@ -61,7 +61,15 @@ MAX_RETRIES = 3
 # Hardcoded Voice Settings (Always use 1.7B model)
 CUSTOM_VOICE_SPEAKER = "Ryan"
 CUSTOM_VOICE_LANGUAGE = "English"
-CUSTOM_VOICE_INSTRUCT = "Speak naturally and clearly, as if reading a dramatic book to an adult audience."
+CUSTOM_VOICE_INSTRUCT = (
+    "Read as a professional audiobook narrator. Use steady pacing, natural intonation, "
+    "and a consistent mid-range pitch. Pause briefly at commas and clearly at periods."
+)
+CUSTOM_VOICE_TITLE_INSTRUCT = (
+    "Announce this as an audiobook section or chapter title. Speak clearly and steadily "
+    "like a professional narrator introducing a new section. Keep an even pitch and pace—"
+    "do not rush, sing, or rise sharply at the end."
+)
 CUSTOM_VOICE_MODEL_SIZE = "1.7B"  # Always use 1.7B
 CUSTOM_VOICE_SEED = -1
 CUSTOM_VOICE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -73,6 +81,8 @@ VOICE_CLONE_MODEL_SIZE = "1.7B"  # Always use 1.7B
 VOICE_CLONE_MAX_CHUNK_CHARS = 200
 VOICE_CLONE_CHUNK_GAP = 0.25  # seconds between internal voice-clone sub-chunks
 VOICE_CLONE_SEED = -1
+# Used only if the Gradio voice-clone endpoint exposes an instruct parameter (Base model usually does not).
+VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
 
 # Processing Settings
 BOOKS_FOLDER = "book_to_convert"  # Input folder
@@ -251,11 +261,11 @@ class QwenAudiobookConverter:
         parameters = endpoint.get("parameters", [])
         return any(parameter.get("parameter_name") == param_name for parameter in parameters)
 
-    def generate_chunk_via_qwen(self, text: str, chunk_num: int) -> Optional[str]:
+    def generate_chunk_via_qwen(self, text: str, chunk_num: int, speech_role: str = "body") -> Optional[str]:
         """Generate audio chunk using Qwen API"""
         try:
             # Check cache first
-            cache_path = self.get_cache_path(text)
+            cache_path = self.get_cache_path(text, speech_role)
             if cache_path.exists():
                 output_path = Path("chunks") / f"chunk_{chunk_num:04d}.wav"
                 shutil.copy2(cache_path, output_path)
@@ -264,9 +274,9 @@ class QwenAudiobookConverter:
 
             # Generate audio based on selected mode
             if self.voice_mode == "custom_voice":
-                result = self._generate_custom_voice(text)
+                result = self._generate_custom_voice(text, speech_role=speech_role)
             elif self.voice_mode == "voice_clone":
-                result = self._generate_voice_clone(text)
+                result = self._generate_voice_clone(text, speech_role=speech_role)
             else:
                 raise ValueError(f"Unknown voice mode: {self.voice_mode}")
 
@@ -293,14 +303,19 @@ class QwenAudiobookConverter:
             self.logger.error(f"Qwen chunk processing failed for chunk {chunk_num}: {e}")
             return None
 
-    def _generate_custom_voice(self, text: str) -> Tuple:
+    def _instruct_for_speech_role(self, speech_role: str) -> str:
+        if speech_role == "section_title":
+            return CUSTOM_VOICE_TITLE_INSTRUCT
+        return CUSTOM_VOICE_INSTRUCT
+
+    def _generate_custom_voice(self, text: str, speech_role: str = "body") -> Tuple:
         """Generate audio using CustomVoice mode"""
         custom_api = self._resolve_api_name("/run_custom_voice", "/generate_custom_voice")
         payload = dict(
             text=text,
             language=CUSTOM_VOICE_LANGUAGE,
             speaker=CUSTOM_VOICE_SPEAKER,
-            instruct=CUSTOM_VOICE_INSTRUCT,
+            instruct=self._instruct_for_speech_role(speech_role),
         )
         if self._endpoint_accepts_param(custom_api, "model_id_cv"):
             payload["model_id_cv"] = CUSTOM_VOICE_MODEL_ID
@@ -312,7 +327,7 @@ class QwenAudiobookConverter:
 
         return self.client.predict(**payload, api_name=custom_api)
 
-    def _generate_voice_clone(self, text: str) -> Tuple:
+    def _generate_voice_clone(self, text: str, speech_role: str = "body") -> Tuple:
         """Generate audio using Voice Clone mode"""
         if not Path(self.voice_clone_ref_audio).exists():
             raise FileNotFoundError(f"Reference audio not found: {self.voice_clone_ref_audio}")
@@ -320,7 +335,7 @@ class QwenAudiobookConverter:
         if not self.voice_clone_ref_text:
             raise ValueError("Reference text is required for voice cloning. Transcription may have failed.")
 
-        return self.client.predict(
+        payload = dict(
             ref_audio=handle_file(self.voice_clone_ref_audio),
             ref_text=self.voice_clone_ref_text,
             target_text=text,
@@ -330,12 +345,16 @@ class QwenAudiobookConverter:
             max_chunk_chars=VOICE_CLONE_MAX_CHUNK_CHARS,
             chunk_gap=VOICE_CLONE_CHUNK_GAP,
             seed=VOICE_CLONE_SEED,
-            api_name="/generate_voice_clone"
         )
+        clone_api = "/generate_voice_clone"
+        if speech_role == "section_title" and self._endpoint_accepts_param(clone_api, "instruct"):
+            payload["instruct"] = VOICE_CLONE_TITLE_INSTRUCT
 
-    def process_chunk_with_retry(self, args: Tuple[int, str]) -> bool:
+        return self.client.predict(**payload, api_name=clone_api)
+
+    def process_chunk_with_retry(self, args: Tuple[int, str, str]) -> bool:
         """Process chunk with retry logic and rate limiting"""
-        chunk_num, text = args
+        chunk_num, text, speech_role = args
 
         # Small delay between chunks to avoid rate limiting (only if not first chunk)
         if chunk_num > 1:
@@ -343,7 +362,7 @@ class QwenAudiobookConverter:
 
         for attempt in range(MAX_RETRIES):
             try:
-                result = self.generate_chunk_via_qwen(text, chunk_num)
+                result = self.generate_chunk_via_qwen(text, chunk_num, speech_role=speech_role)
                 if result and Path(result).exists():
                     return True
                 else:
@@ -359,9 +378,13 @@ class QwenAudiobookConverter:
         self.logger.error(f"Chunk {chunk_num} failed after {MAX_RETRIES} attempts")
         return False
 
-    def get_cache_path(self, text: str) -> Path:
+    def get_cache_path(self, text: str, speech_role: str = "body") -> Path:
         """Get cache path for text chunk"""
-        content = f"{text}_{self.voice_mode}_{CUSTOM_VOICE_SPEAKER if self.voice_mode == 'custom_voice' else Path(self.voice_clone_ref_audio).name if self.voice_clone_ref_audio else ''}"
+        instruct_key = self._instruct_for_speech_role(speech_role) if self.voice_mode == "custom_voice" else speech_role
+        content = (
+            f"{text}_{self.voice_mode}_{instruct_key}_"
+            f"{CUSTOM_VOICE_SPEAKER if self.voice_mode == 'custom_voice' else Path(self.voice_clone_ref_audio).name if self.voice_clone_ref_audio else ''}"
+        )
         hash_obj = hashlib.md5(content.encode())
         return Path("cache/audio_chunks") / f"{hash_obj.hexdigest()}.wav"
 
@@ -535,11 +558,11 @@ class QwenAudiobookConverter:
             return CHUNK_SIZE_WORDS_VOICE_CLONE
         return CHUNK_SIZE_WORDS_CUSTOM
 
-    def split_into_chunks(self, text: str) -> List[TextChunk]:
+    def split_into_chunks(self, text: str, *, for_section: bool = False) -> List[TextChunk]:
         """Split structured text into TTS chunks with pause metadata."""
         if not text.strip():
             return []
-        return split_into_tts_chunks(text, max_words=self._chunk_size_words())
+        return split_into_tts_chunks(text, max_words=self._chunk_size_words(), for_section=for_section)
 
     def combine_chunks(
         self,
@@ -636,7 +659,7 @@ class QwenAudiobookConverter:
         total_sections: int,
     ) -> bool:
         """Convert one audiobook section (chapter) to a single MP3 file."""
-        chunks = self.split_into_chunks(section.text)
+        chunks = self.split_into_chunks(section.text, for_section=True)
         total_chunks = len(chunks)
         if total_chunks == 0:
             self.logger.error(f"No chunks for section: {section.title}")
@@ -656,13 +679,13 @@ class QwenAudiobookConverter:
             f"{'=' * 50}"
         )
 
-        chunk_args = [(i + 1, chunk.text) for i, chunk in enumerate(chunks)]
+        chunk_args = [(i + 1, chunk.text, chunk.speech_role) for i, chunk in enumerate(chunks)]
         chunk_pauses = [chunk.pause_before_ms for chunk in chunks]
         results: Dict[int, bool] = {}
 
-        for chunk_num, chunk_text in chunk_args:
+        for chunk_num, chunk_text, speech_role in chunk_args:
             try:
-                result = self.process_chunk_with_retry((chunk_num, chunk_text))
+                result = self.process_chunk_with_retry((chunk_num, chunk_text, speech_role))
                 results[chunk_num] = result
                 status = "OK" if result else "FAIL"
                 print(f"[{status}] Section {section.track_number} chunk {chunk_num:3d}/{total_chunks}")
