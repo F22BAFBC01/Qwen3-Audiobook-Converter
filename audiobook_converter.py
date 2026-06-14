@@ -93,8 +93,8 @@ VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
 # Processing Settings
 BOOKS_FOLDER = "book_to_convert"  # Input folder
 AUDIOBOOKS_FOLDER = "audiobooks"  # Output folder
-# Custom voice: one Gradio call per ~500-char passage (Qwen API recommendation).
-CUSTOM_VOICE_MAX_CHUNK_CHARS = 500
+# Custom voice: one Gradio call per passage (character cap per API call).
+CUSTOM_VOICE_MAX_CHUNK_CHARS = 1750
 MAX_WORKERS = 1  # Keep at 1 to avoid rate limiting
 AUDIO_FORMAT = "mp3"
 AUDIO_BITRATE = "128k"

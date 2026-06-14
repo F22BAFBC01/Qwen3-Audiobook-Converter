@@ -218,11 +218,20 @@ def test_synthesis_units_group_by_structure():
 
 def test_custom_voice_char_limit_splits():
     """Custom voice mode should cap API calls at char limit, not hundreds of words."""
-    paragraph = " ".join([f"This is sentence number {i} in the test paragraph." for i in range(1, 25)])
-    chunks = split_into_tts_chunks(paragraph, max_words=10_000, max_chars=500, for_section=False)
+    max_chars = 1750  # keep in sync with CUSTOM_VOICE_MAX_CHUNK_CHARS in audiobook_converter.py
+
+    paragraph = " ".join(
+        [f"This is sentence number {i} in the test paragraph." for i in range(1, 40)]
+    )
+    chunks = split_into_tts_chunks(
+        paragraph,
+        max_words=10_000,
+        max_chars=max_chars,
+        for_section=False,
+    )
     assert len(chunks) > 1, "expected char-limit split"
-    assert all(len(chunk.text) <= 500 for chunk in chunks), [
-        len(chunk.text) for chunk in chunks if len(chunk.text) > 500
+    assert all(len(chunk.text) <= max_chars for chunk in chunks), [
+        len(chunk.text) for chunk in chunks if len(chunk.text) > max_chars
     ]
 
 
