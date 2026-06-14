@@ -15,6 +15,7 @@ from book_text import (
     is_section_title,
     merge_continuation_blocks,
     merge_heading_blocks,
+    _heading_body_separator,
     parse_text_blocks,
     prepare_section_text_for_tts,
     split_block_into_chunks,
@@ -165,22 +166,22 @@ def test_heading_merged_into_body():
         ("You feel overwhelmed.", PAUSE_PARAGRAPH_MS),
     ]
     merged = merge_heading_blocks(blocks)
-    assert merged[0][0].startswith('"Introduction\u2014"\n\nI\'ve been')
-    assert merged[1][0].startswith('"Signs That You Need Boundaries\u2014"\n\nYou feel')
+    assert merged[0][0].startswith("Introduction.\n\nI've been")
+    assert merged[1][0].startswith("Signs That You Need Boundaries.\n\n\nYou feel")
 
 
 def test_synthesis_splits_at_section_pause():
     blocks = [
-        ('"Introduction\u2014"\n\nFirst subsection paragraph.', 0),
+        ("Introduction.\n\nFirst subsection paragraph.", 0),
         ("Second paragraph in same subsection.", PAUSE_PARAGRAPH_MS),
-        ('"Signs That You Need Boundaries\u2014"\n\nSubsection body.', PAUSE_SECTION_MS),
+        ("Signs That You Need Boundaries.\n\n\nSubsection body.", PAUSE_SECTION_MS),
         ("Another paragraph.", PAUSE_PARAGRAPH_MS),
     ]
     units = group_blocks_for_synthesis(blocks)
     assert len(units) == 2
-    assert units[0][0].count("\n\n") >= 2
+    assert units[0][0].count("\n\n") >= 1
     assert "Second paragraph" in units[0][0]
-    assert units[1][0].startswith('"Signs That You Need Boundaries')
+    assert units[1][0].startswith("Signs That You Need Boundaries.")
 
 
 def test_synthesis_units_group_by_structure():
@@ -205,9 +206,9 @@ def test_synthesis_units_group_by_structure():
     intro_units = split_into_tts_chunks(intro.text, for_section=True)
 
     assert len(preface_units) == 1, f"Preface should be one synthesis unit, got {len(preface_units)}"
-    assert '"Preface\u2014"\n\n' in preface_units[0].text
+    assert preface_units[0].text.startswith("Preface.\n\n")
     assert len(intro_units) > 1, "Introduction has subsections — expect multiple synthesis units"
-    assert '"Introduction\u2014"\n\n' in intro_units[0].text
+    assert intro_units[0].text.startswith("Introduction.\n\n")
     print(
         f"Preface: {len(preface_units)} unit(s); "
         f"Introduction: {len(intro_units)} units; "
@@ -244,14 +245,22 @@ def test_merge_continuation_blocks():
 
 
 def test_format_heading_for_tts():
-    assert format_heading_for_tts("Preface.") == '"Preface\u2014"'
-    assert format_heading_for_tts("Chapter 2. The Cost") == '"Chapter 2. The Cost\u2014"'
+    assert format_heading_for_tts("Preface.") == "Preface."
+    assert format_heading_for_tts("Chapter 2. The Cost") == "Chapter 2. The Cost."
+    assert format_heading_for_tts("What Are Boundaries?") == "What Are Boundaries?"
+
+
+def test_heading_body_separator():
+    assert _heading_body_separator(0) == "\n\n"
+    assert _heading_body_separator(PAUSE_SECTION_MS) == "\n\n\n"
+    assert _heading_body_separator(PAUSE_MAJOR_MS) == "\n\n\n\n"
 
 
 if __name__ == "__main__":
     test_blank_line_pauses()
     test_blocks_to_text_roundtrip()
     test_format_heading_for_tts()
+    test_heading_body_separator()
     test_merge_continuation_blocks()
     test_heading_merged_into_body()
     test_chapter_titles_with_question_mark_are_sections()

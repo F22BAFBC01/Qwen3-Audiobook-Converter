@@ -282,9 +282,22 @@ def merge_continuation_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, 
 
 
 def format_heading_for_tts(text: str) -> str:
-    """Prefix for headings merged into the following body (TTS pauses after quoted title)."""
-    line = _first_line(text).strip().rstrip(".")
-    return f'"{line}\u2014"'
+    """Normalize a heading line for TTS (plain text on its own line)."""
+    line = _first_line(text).strip()
+    if not line:
+        return ""
+    if not line.endswith((".", "?", "!")):
+        line += "."
+    return line
+
+
+def _heading_body_separator(pause_before_ms: int) -> str:
+    """Blank lines between a merged heading and the following body."""
+    if pause_before_ms >= PAUSE_MAJOR_MS:
+        return "\n\n\n\n"
+    if pause_before_ms >= PAUSE_SECTION_MS:
+        return "\n\n\n"
+    return "\n\n"
 
 
 def is_attachable_heading(text: str, pause_before_ms: int = 0) -> bool:
@@ -303,7 +316,7 @@ def is_attachable_heading(text: str, pause_before_ms: int = 0) -> bool:
 
 
 def merge_heading_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
-    """Attach headings on their own line before the body (quoted em-dash title, then blank line)."""
+    """Attach headings on their own line before the body, separated by blank lines."""
     if not blocks:
         return blocks
 
@@ -313,8 +326,9 @@ def merge_heading_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]
         text, pause = blocks[i]
         if is_attachable_heading(text, pause) and i + 1 < len(blocks):
             nxt_text, _ = blocks[i + 1]
+            gap = _heading_body_separator(pause)
             merged.append(
-                (f"{format_heading_for_tts(text)}\n\n{nxt_text.lstrip()}", pause)
+                (f"{format_heading_for_tts(text)}{gap}{nxt_text.lstrip()}", pause)
             )
             i += 2
         else:
