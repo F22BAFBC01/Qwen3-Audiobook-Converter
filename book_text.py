@@ -207,15 +207,17 @@ def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = Fals
         blocks = [(text.strip(), 0)]
 
     chunks: list[TextChunk] = []
-    for block_text, pause_ms in blocks:
-        is_title_block = is_section_title(block_text) and not is_short_section_title(block_text)
+    for index, (block_text, pause_ms) in enumerate(blocks):
+        if index > 0 and is_section_title(blocks[index - 1][0]):
+            pause_ms = max(pause_ms, PAUSE_MAJOR_MS)
+        is_title_block = is_section_title(block_text)
         sub_chunks = split_block_into_chunks(block_text, max_words)
-        for index, sub_chunk in enumerate(sub_chunks):
-            speech_role = "section_title" if is_title_block and index == 0 else "body"
+        for sub_index, sub_chunk in enumerate(sub_chunks):
+            speech_role = "section_title" if is_title_block and sub_index == 0 else "body"
             chunks.append(
                 TextChunk(
                     text=sub_chunk,
-                    pause_before_ms=pause_ms if index == 0 else 0,
+                    pause_before_ms=pause_ms if sub_index == 0 else 0,
                     speech_role=speech_role,
                 )
             )
@@ -267,28 +269,19 @@ def extract_section_title(text: str) -> str:
 
 
 def is_short_section_title(text: str, max_words: int = 6) -> bool:
-    """Short standalone titles (e.g. 'Preface.') need merging for stable TTS delivery."""
+    """True for brief standalone titles such as 'Preface.' or 'Introduction.'"""
     if not is_section_title(text):
         return False
     return len(_first_line(text).split()) <= max_words
 
 
-def coalesce_short_title_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
-    """
-    Merge brief section titles into the following paragraph.
-
-    Single-word headings sent alone to TTS often get unstable pitch and pacing.
-    """
-    if len(blocks) < 2:
-        return blocks
-
-    first_text, first_pause = blocks[0]
-    if not is_short_section_title(first_text):
-        return blocks
-
-    second_text, _second_pause = blocks[1]
-    merged = f"{first_text.rstrip()} {second_text.lstrip()}"
-    return [(merged, first_pause)] + blocks[2:]
+def _separator_newlines_for_pause(pause_ms: int) -> int:
+    """Newline count between blocks so parse_text_blocks roundtrips pauses correctly."""
+    if pause_ms >= PAUSE_MAJOR_MS:
+        return 4
+    if pause_ms >= PAUSE_SECTION_MS:
+        return 3
+    return 2
 
 
 def blocks_to_text(blocks: list[tuple[str, int]]) -> str:
@@ -296,22 +289,16 @@ def blocks_to_text(blocks: list[tuple[str, int]]) -> str:
     parts: list[str] = []
     for block_text, pause_ms in blocks:
         if parts:
-            blank_lines = 1
-            if pause_ms >= PAUSE_MAJOR_MS:
-                blank_lines = 3
-            elif pause_ms >= PAUSE_SECTION_MS:
-                blank_lines = 2
-            parts.append("\n" * blank_lines)
+            parts.append("\n" * _separator_newlines_for_pause(pause_ms))
         parts.append(block_text)
     return "".join(parts)
 
 
 def prepare_section_text_for_tts(section_text: str) -> str:
-    """Apply section-level text normalizations before TTS chunking."""
+    """Normalize section block boundaries before TTS chunking."""
     blocks = parse_text_blocks(section_text)
     if not blocks:
         return section_text
-    blocks = coalesce_short_title_blocks(blocks)
     return blocks_to_text(blocks)
 
 

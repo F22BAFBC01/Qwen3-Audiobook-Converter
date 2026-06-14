@@ -7,8 +7,8 @@ from book_text import (
     PAUSE_MAJOR_MS,
     PAUSE_PARAGRAPH_MS,
     PAUSE_SECTION_MS,
+    blocks_to_text,
     parse_text_blocks,
-    prepare_section_text_for_tts,
     split_into_audiobook_sections,
     split_into_tts_chunks,
 )
@@ -104,32 +104,51 @@ def test_structured_epub_matches_audiobook_sample():
     print(f"Structured EPUB: {len(formatted.split()):,} words, {len(sections)} sections")
 
 
-def test_short_title_merged_for_tts():
-    sample = Path(__file__).resolve().parent.parent / (
-        "Set Boundaries, Find Peace - Nedra Glover Tawwab (audiobook).txt"
-    )
-    if not sample.exists():
-        print("SKIP: audiobook sample not found")
+def test_blocks_to_text_roundtrip():
+    blocks = [
+        ("Title.", 0),
+        ("First paragraph.", PAUSE_PARAGRAPH_MS),
+        ("Second paragraph.", PAUSE_PARAGRAPH_MS),
+    ]
+    roundtrip = parse_text_blocks(blocks_to_text(blocks))
+    assert len(roundtrip) == len(blocks)
+    assert roundtrip[0][0] == "Title."
+    assert roundtrip[1][1] == PAUSE_PARAGRAPH_MS
+
+
+def test_short_section_title_delivery():
+    """Short section titles are announced separately with a major pause before body."""
+    epub_candidates = list(Path(__file__).resolve().parent.glob("book_to_convert/*.epub"))
+    epub_candidates += list(Path(__file__).resolve().parent.parent.glob("*Tawwab*.epub"))
+    if not epub_candidates:
+        print("SKIP: no EPUB found for section title delivery test")
         return
 
-    text = sample.read_text(encoding="utf-8")
-    sections = split_into_audiobook_sections(text)
-    preface = sections[0]
-    prepared = prepare_section_text_for_tts(preface.text)
-    chunks = split_into_tts_chunks(prepared, max_words=300, for_section=False)
+    from book_format import format_epub
 
-    assert chunks, "expected chunks"
-    first = chunks[0].text
-    assert first != "Preface.", f"short title should be merged, got: {first!r}"
-    assert first.startswith("Preface."), first
-    assert "My life before" in first or len(first.split()) > 5, first
-    print(f"Preface opener chunk: {first[:100]}...")
+    try:
+        text = format_epub(epub_candidates[0])
+    except RuntimeError as exc:
+        print(f"SKIP: EPUB deps not installed ({exc})")
+        return
+
+    sections = split_into_audiobook_sections(text)
+    for title in ("Preface", "Introduction"):
+        section = next(s for s in sections if s.title == title)
+        chunks = split_into_tts_chunks(section.text, max_words=300, for_section=True)
+        assert chunks[0].text.rstrip(".") == title, chunks[0].text
+        assert chunks[0].speech_role == "section_title", chunks[0].speech_role
+        assert chunks[1].speech_role == "body", chunks[1].speech_role
+        assert chunks[1].pause_before_ms >= PAUSE_MAJOR_MS, chunks[1].pause_before_ms
+        assert title not in chunks[1].text[:20], chunks[1].text[:80]
+        print(f"{title}: title chunk + {chunks[1].pause_before_ms}ms pause before body")
 
 
 if __name__ == "__main__":
     test_blank_line_pauses()
+    test_blocks_to_text_roundtrip()
     test_formatted_audiobook_sample()
     test_audiobook_sections()
     test_structured_epub_matches_audiobook_sample()
-    test_short_title_merged_for_tts()
+    test_short_section_title_delivery()
     print("OK")
