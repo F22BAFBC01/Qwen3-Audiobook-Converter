@@ -32,6 +32,7 @@ from gradio_client import Client, handle_file
 from book_text import (
     AudiobookSection,
     TextChunk,
+    PAUSE_PARAGRAPH_MS,
     clean_text_preserve_structure,
     split_into_audiobook_sections,
     split_into_tts_chunks,
@@ -80,8 +81,13 @@ CUSTOM_VOICE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 VOICE_CLONE_LANGUAGE = "English"
 VOICE_CLONE_USE_XVECTOR_ONLY = False
 VOICE_CLONE_MODEL_SIZE = "1.7B"  # Always use 1.7B
-VOICE_CLONE_MAX_CHUNK_CHARS = 500  # Gradio voice-clone API maximum
-VOICE_CLONE_CHUNK_GAP = 0  # No silence between internal voice-clone sub-chunks
+# Voice clone uses two chunk sizes:
+# - EXPORT chunks (chunk_0001.wav): ~1500 words per file — pre-fork batch size for combine/export.
+# - API segments: max 200 chars per Gradio call — pre-fork max_chunk_chars; we split client-side
+#   at sentence/word boundaries and crossfade so the server never splits mid-word inside one response.
+VOICE_CLONE_MAX_CHUNK_CHARS = 200
+VOICE_CLONE_CHUNK_GAP = 0
+VOICE_CLONE_CROSSFADE_MS = 15
 VOICE_CLONE_SEED = -1
 # Used only if the Gradio voice-clone endpoint exposes an instruct parameter (Base model usually does not).
 VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
@@ -89,8 +95,8 @@ VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
 # Processing Settings
 BOOKS_FOLDER = "book_to_convert"  # Input folder
 AUDIOBOOKS_FOLDER = "audiobooks"  # Output folder
-CHUNK_SIZE_WORDS_CUSTOM = 600  # Smaller chunks keep Qwen3 pauses natural
-CHUNK_SIZE_WORDS_VOICE_CLONE = 300  # Voice clone compresses pauses on long inputs
+CHUNK_SIZE_WORDS_CUSTOM = 600
+CHUNK_SIZE_WORDS_VOICE_CLONE = 1500  # Pre-fork export chunk size (~7 min per chunk file)
 MAX_WORKERS = 1  # Keep at 1 to avoid rate limiting
 AUDIO_FORMAT = "mp3"
 AUDIO_BITRATE = "128k"
@@ -354,15 +360,21 @@ class QwenAudiobookConverter:
 
         return self.client.predict(**payload, api_name=clone_api)
 
-    def _generate_voice_clone_stitched(self, text: str, speech_role: str = "body") -> Tuple:
-        """Generate voice-clone audio, splitting at sentence boundaries when over API char limit."""
+    @staticmethod
+    def _crossfade_append(left: AudioSegment, right: AudioSegment, crossfade_ms: int) -> AudioSegment:
+        if crossfade_ms <= 0 or len(left) == 0:
+            return left + right
+        if len(left) < crossfade_ms:
+            return left + right
+        return left.append(right, crossfade=crossfade_ms)
+
+    def _synthesize_voice_clone_segments(self, text: str, speech_role: str = "body") -> AudioSegment:
+        """Synthesize text via 200-char API segments with crossfade (no silence between segments)."""
         segments = split_text_for_voice_clone(text, VOICE_CLONE_MAX_CHUNK_CHARS)
         if not segments:
             raise RuntimeError("No text to synthesize")
-        if len(segments) == 1:
-            return self._generate_voice_clone(segments[0], speech_role=speech_role)
 
-        combined = AudioSegment.empty()
+        combined: AudioSegment | None = None
         for segment in segments:
             result = self._generate_voice_clone(segment, speech_role=speech_role)
             if not result or len(result) < 1:
@@ -370,11 +382,47 @@ class QwenAudiobookConverter:
             audio_path = result[0]
             if not audio_path or not Path(audio_path).exists():
                 raise RuntimeError(f"Generated audio file not found: {audio_path}")
-            combined += AudioSegment.from_wav(str(audio_path))
+            segment_audio = AudioSegment.from_wav(str(audio_path))
+            if combined is None:
+                combined = segment_audio
+            else:
+                combined = self._crossfade_append(
+                    combined, segment_audio, VOICE_CLONE_CROSSFADE_MS
+                )
+        if combined is None:
+            raise RuntimeError("No audio synthesized")
+        return combined
 
-        temp_path = Path("chunks") / f"_vc_stitch_{hashlib.md5(text.encode()).hexdigest()}.wav"
+    def _generate_voice_clone_stitched(self, text: str, speech_role: str = "body") -> Tuple:
+        """
+        Synthesize export-chunk text: paragraph pauses only, 200-char API segments within each paragraph.
+
+        Avoids server-side mid-word splits (pre-fork used 200-char max internally with large target_text;
+        we now split explicitly and crossfade).
+        """
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        if not paragraphs:
+            paragraphs = [text.strip()]
+
+        combined: AudioSegment | None = None
+        frame_rate: int | None = None
+        for index, paragraph in enumerate(paragraphs):
+            paragraph_audio = self._synthesize_voice_clone_segments(paragraph, speech_role=speech_role)
+            if frame_rate is None:
+                frame_rate = paragraph_audio.frame_rate
+            if combined is not None:
+                combined += AudioSegment.silent(duration=PAUSE_PARAGRAPH_MS, frame_rate=frame_rate)
+            if combined is None:
+                combined = paragraph_audio
+            else:
+                combined += paragraph_audio
+
+        if combined is None:
+            raise RuntimeError("No audio synthesized")
+
+        temp_path = Path("chunks") / f"_vc_{hashlib.md5(text.encode()).hexdigest()}.wav"
         combined.export(str(temp_path), format="wav")
-        return (str(temp_path), f"stitched {len(segments)} segments")
+        return (str(temp_path), f"stitched {len(paragraphs)} paragraphs")
 
     def process_chunk_with_retry(self, args: Tuple[int, str, str]) -> bool:
         """Process chunk with retry logic and rate limiting"""
@@ -406,7 +454,7 @@ class QwenAudiobookConverter:
         """Get cache path for text chunk"""
         instruct_key = self._instruct_for_speech_role(speech_role) if self.voice_mode == "custom_voice" else speech_role
         content = (
-            f"{text}_{self.voice_mode}_{instruct_key}_"
+            f"{text}_{self.voice_mode}_{instruct_key}_vc{VOICE_CLONE_MAX_CHUNK_CHARS}_"
             f"{CUSTOM_VOICE_SPEAKER if self.voice_mode == 'custom_voice' else Path(self.voice_clone_ref_audio).name if self.voice_clone_ref_audio else ''}"
         )
         hash_obj = hashlib.md5(content.encode())

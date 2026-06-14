@@ -275,13 +275,79 @@ def merge_continuation_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, 
     return merged
 
 
-def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = False) -> list[TextChunk]:
-    """Split structured audiobook text into TTS chunks with pause metadata.
+def format_heading_for_tts(text: str) -> str:
+    """Prefix for headings merged into the following body (TTS pauses after quoted title)."""
+    line = _first_line(text).strip().rstrip(".")
+    return f'"{line}."'
 
-    Structural pauses (paragraph/section blank lines) are attached only to the
-    first sub-chunk of each text block. Word-limit splits within a block never
-    receive pauses — silence is not inserted mid-paragraph.
+
+def is_attachable_heading(text: str, pause_before_ms: int = 0) -> bool:
+    """True when a short heading/subheading should be read with the next paragraph."""
+    if is_section_title(text):
+        return True
+    line = _first_line(text)
+    if "\n" in text or is_toc_artifact(text):
+        return False
+    words = line.split()
+    if not line.endswith(".") or len(words) > 14 or len(line) > 100:
+        return False
+    if pause_before_ms >= PAUSE_SECTION_MS:
+        return True
+    return False
+
+
+def merge_heading_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Attach headings and subheadings to the following body using quoted prefixes."""
+    if not blocks:
+        return blocks
+
+    merged: list[tuple[str, int]] = []
+    i = 0
+    while i < len(blocks):
+        text, pause = blocks[i]
+        if is_attachable_heading(text, pause) and i + 1 < len(blocks):
+            nxt_text, _ = blocks[i + 1]
+            merged.append((f"{format_heading_for_tts(text)} {nxt_text.lstrip()}", pause))
+            i += 2
+        else:
+            merged.append((text, pause))
+            i += 1
+    return merged
+
+
+def group_blocks_for_export(
+    blocks: list[tuple[str, int]], max_words: int
+) -> list[tuple[list[str], int]]:
     """
+    Group paragraph blocks into large export chunks (~pre-fork 1500-word batches).
+
+    Pauses are only between export chunks (and paragraph pauses are applied during
+    voice-clone synthesis), not between sentences.
+    """
+    groups: list[tuple[list[str], int]] = []
+    current: list[str] = []
+    current_words = 0
+    group_pause = 0
+
+    for block_text, pause_ms in blocks:
+        block_words = len(block_text.split())
+        if current and current_words + block_words > max_words:
+            groups.append((current, group_pause))
+            current = []
+            current_words = 0
+            group_pause = pause_ms
+        if not current:
+            group_pause = pause_ms
+        current.append(block_text)
+        current_words += block_words
+
+    if current:
+        groups.append((current, group_pause))
+    return groups
+
+
+def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = False) -> list[TextChunk]:
+    """Split text into large export chunks with pause metadata (paragraph/s section only)."""
     if for_section:
         text = prepare_section_text_for_tts(text)
 
@@ -290,20 +356,26 @@ def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = Fals
         blocks = [(text.strip(), 0)]
 
     chunks: list[TextChunk] = []
-    for index, (block_text, pause_ms) in enumerate(blocks):
-        if index > 0 and is_section_title(blocks[index - 1][0]):
-            pause_ms = max(pause_ms, PAUSE_MAJOR_MS)
-        is_title_block = is_section_title(block_text)
-        sub_chunks = split_block_into_chunks(block_text, max_words)
-        for sub_index, sub_chunk in enumerate(sub_chunks):
-            speech_role = "section_title" if is_title_block and sub_index == 0 else "body"
-            chunks.append(
-                TextChunk(
-                    text=sub_chunk,
-                    pause_before_ms=pause_ms if sub_index == 0 else 0,
-                    speech_role=speech_role,
+    for group_blocks, pause_ms in group_blocks_for_export(blocks, max_words):
+        if len(group_blocks) == 1 and len(group_blocks[0].split()) > max_words:
+            for sub_index, sub_text in enumerate(split_block_into_chunks(group_blocks[0], max_words)):
+                chunks.append(
+                    TextChunk(
+                        text=sub_text,
+                        pause_before_ms=pause_ms if sub_index == 0 else 0,
+                        speech_role="body",
+                    )
                 )
+            continue
+
+        chunk_text = "\n\n".join(group_blocks)
+        chunks.append(
+            TextChunk(
+                text=chunk_text,
+                pause_before_ms=pause_ms,
+                speech_role="body",
             )
+        )
 
     return chunks
 
@@ -383,6 +455,7 @@ def prepare_section_text_for_tts(section_text: str) -> str:
     if not blocks:
         return section_text
     blocks = merge_continuation_blocks(blocks)
+    blocks = merge_heading_blocks(blocks)
     return blocks_to_text(blocks)
 
 

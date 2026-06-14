@@ -8,8 +8,11 @@ from book_text import (
     PAUSE_PARAGRAPH_MS,
     PAUSE_SECTION_MS,
     blocks_to_text,
+    format_heading_for_tts,
     merge_continuation_blocks,
+    merge_heading_blocks,
     parse_text_blocks,
+    prepare_section_text_for_tts,
     split_block_into_chunks,
     split_into_audiobook_sections,
     split_into_tts_chunks,
@@ -35,12 +38,12 @@ def test_formatted_audiobook_sample():
         return
 
     text = sample.read_text(encoding="utf-8")
-    chunks = split_into_tts_chunks(text, max_words=300)
+    chunks = split_into_tts_chunks(text, max_words=1500)
 
     assert chunks, "expected chunks from audiobook sample"
     assert any(c.pause_before_ms == PAUSE_MAJOR_MS for c in chunks), "expected major pauses"
     assert any(c.pause_before_ms == PAUSE_SECTION_MS for c in chunks), "expected section pauses"
-    assert all(len(c.text.split()) <= 300 for c in chunks), "chunks exceed word limit"
+    assert all(len(c.text.split()) <= 1500 for c in chunks), "chunks exceed word limit"
 
     major = [c for c in chunks if c.pause_before_ms == PAUSE_MAJOR_MS][:5]
     print(f"Total chunks: {len(chunks)}")
@@ -126,15 +129,49 @@ def test_split_text_for_voice_clone():
         "and unfulfilling relationships. But setting expectations and limits "
         "helped me find balance."
     )
-    segments = split_text_for_voice_clone(paragraph, max_chars=500)
+    segments = split_text_for_voice_clone(paragraph, max_chars=200)
     assert segments
-    assert all(len(segment) <= 500 for segment in segments)
+    assert all(len(segment) <= 200 for segment in segments)
     assert " ".join(segments) == paragraph
-    assert len(segments) >= 1
+    assert len(segments) > 1
+
+
+def test_heading_merged_into_body():
+    blocks = [
+        ("Introduction.", 0),
+        ("I've been a therapist for fourteen years.", PAUSE_PARAGRAPH_MS),
+        ("Signs That You Need Boundaries.", PAUSE_SECTION_MS),
+        ("You feel overwhelmed.", PAUSE_PARAGRAPH_MS),
+    ]
+    merged = merge_heading_blocks(blocks)
+    assert merged[0][0].startswith('"Introduction." I\'ve been')
+    assert merged[1][0].startswith('"Signs That You Need Boundaries." You feel')
+
+
+def test_export_chunks_are_large_batches():
+    epub_candidates = list(Path(__file__).resolve().parent.parent.glob("*Tawwab*.epub"))
+    if not epub_candidates:
+        print("SKIP: no EPUB for export chunk test")
+        return
+
+    from book_format import format_epub
+
+    try:
+        text = format_epub(epub_candidates[0])
+    except RuntimeError as exc:
+        print(f"SKIP: EPUB deps not installed ({exc})")
+        return
+
+    intro = next(s for s in split_into_audiobook_sections(text) if s.title == "Introduction")
+    chunks = split_into_tts_chunks(intro.text, max_words=1500, for_section=True)
+    assert len(chunks) < 50, f"expected few export chunks, got {len(chunks)}"
+    assert chunks[0].text.startswith('"Introduction."'), chunks[0].text[:80]
+    assert chunks[0].speech_role == "body"
+    print(f"Introduction: {len(chunks)} export chunks, first opens: {chunks[0].text[:70]}...")
 
 
 def test_word_limit_splits_have_no_mid_paragraph_pause():
-    """Word-limit sub-chunks within one block must not receive structural pauses."""
+    """Oversized single blocks split for word limit only — no pauses between parts."""
     paragraph = " ".join(["This is sentence number %d." % i for i in range(1, 80)])
     sub_chunks = split_block_into_chunks(paragraph, max_words=40)
     assert len(sub_chunks) > 1, "expected word-limit split"
@@ -161,42 +198,21 @@ def test_merge_continuation_blocks():
     assert merged[2][0].startswith("Examples:")
 
 
-def test_short_section_title_delivery():
-    """Short section titles are announced separately with a major pause before body."""
-    epub_candidates = list(Path(__file__).resolve().parent.glob("book_to_convert/*.epub"))
-    epub_candidates += list(Path(__file__).resolve().parent.parent.glob("*Tawwab*.epub"))
-    if not epub_candidates:
-        print("SKIP: no EPUB found for section title delivery test")
-        return
-
-    from book_format import format_epub
-
-    try:
-        text = format_epub(epub_candidates[0])
-    except RuntimeError as exc:
-        print(f"SKIP: EPUB deps not installed ({exc})")
-        return
-
-    sections = split_into_audiobook_sections(text)
-    for title in ("Preface", "Introduction"):
-        section = next(s for s in sections if s.title == title)
-        chunks = split_into_tts_chunks(section.text, max_words=300, for_section=True)
-        assert chunks[0].text.rstrip(".") == title, chunks[0].text
-        assert chunks[0].speech_role == "section_title", chunks[0].speech_role
-        assert chunks[1].speech_role == "body", chunks[1].speech_role
-        assert chunks[1].pause_before_ms >= PAUSE_MAJOR_MS, chunks[1].pause_before_ms
-        assert title not in chunks[1].text[:20], chunks[1].text[:80]
-        print(f"{title}: title chunk + {chunks[1].pause_before_ms}ms pause before body")
+def test_format_heading_for_tts():
+    assert format_heading_for_tts("Preface.") == '"Preface."'
+    assert format_heading_for_tts("Chapter 2. The Cost") == '"Chapter 2. The Cost."'
 
 
 if __name__ == "__main__":
     test_blank_line_pauses()
     test_blocks_to_text_roundtrip()
+    test_format_heading_for_tts()
     test_merge_continuation_blocks()
+    test_heading_merged_into_body()
     test_split_text_for_voice_clone()
     test_word_limit_splits_have_no_mid_paragraph_pause()
     test_formatted_audiobook_sample()
     test_audiobook_sections()
     test_structured_epub_matches_audiobook_sample()
-    test_short_section_title_delivery()
+    test_export_chunks_are_large_batches()
     print("OK")
