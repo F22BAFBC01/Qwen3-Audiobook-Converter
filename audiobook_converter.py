@@ -840,8 +840,18 @@ class QwenAudiobookConverter:
                 print(f"  {section.track_number:>2}. {section.title} -> {section.filename}")
 
             results: Dict[str, bool] = {}
+            skipped_filenames: set[str] = set()
             for section in sections:
                 section_path = output_dir / Path(section.filename).with_suffix(f".{AUDIO_FORMAT}")
+                if section_path.exists():
+                    skipped_filenames.add(section.filename)
+                    print(
+                        f"[SKIP] Section {section.track_number}/{len(sections)}: "
+                        f"{section.title} -> {section_path.name} (already exists)"
+                    )
+                    self.logger.info(f"Resuming: skipped existing section {section_path}")
+                    results[section.filename] = True
+                    continue
                 try:
                     results[section.filename] = self.convert_section(
                         section,
@@ -859,14 +869,23 @@ class QwenAudiobookConverter:
             duration = time.time() - start_time
             minutes = int(duration // 60)
             seconds = int(duration % 60)
+            skipped = len(skipped_filenames)
 
             print(f"\n{'=' * 50}")
-            print(f"BOOK COMPLETE: {successful}/{len(sections)} sections")
+            if skipped:
+                print(
+                    f"BOOK COMPLETE: {successful}/{len(sections)} sections "
+                    f"({skipped} skipped, {successful - skipped} converted)"
+                )
+            else:
+                print(f"BOOK COMPLETE: {successful}/{len(sections)} sections")
             print(f"Output folder: {output_dir}")
             print(f"Time: {minutes}m {seconds}s")
             print(f"{'=' * 50}")
 
             for filename, ok in results.items():
+                if filename in skipped_filenames:
+                    continue
                 print(f"{'[OK]' if ok else '[FAIL]'} {filename}")
 
             return successful > 0
