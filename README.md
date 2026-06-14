@@ -8,7 +8,7 @@
 >
 > - **Audiobook-oriented text handling** — preserves paragraph/chapter blank lines and inserts silence at those boundaries (instead of flattening all whitespace).
 > - **One MP3 per section** — ACX-style numbered chapter files in `audiobooks/<book title>/`, with ID3 track metadata (`mutagen`).
-> - **Structured EPUB extraction** — semantic parsing for supported books (e.g. *Set Boundaries, Find Peace*, *Adult Children of Emotionally Immature Parents*) to skip blurbs, TOC noise, and back matter; generic EPUB fallback remains.
+> - **Structured EPUB extraction** — general-purpose semantic parsing for EPUBs (spine order, HTML roles/classes) to skip blurbs, TOC noise, and back matter; falls back to plain HTML extraction if needed.
 > - **Smaller TTS chunks** for voice clone, title/section delivery tweaks, and narration `instruct` strings for custom voice mode.
 > - **New modules:** `book_text.py`, `book_format.py`, `mp3_tags.py`.
 >

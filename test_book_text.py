@@ -78,23 +78,29 @@ def test_audiobook_sections():
 
 
 def test_structured_epub_matches_audiobook_sample():
-    """Structured EPUB output should match pre-formatted audiobook section split."""
+    """General EPUB extraction should produce a sensible section split for Tawwab."""
     epub_candidates = list(Path(__file__).resolve().parent.glob("book_to_convert/*.epub"))
     epub_candidates += list(Path(__file__).resolve().parent.parent.glob("*Tawwab*.epub"))
     if not epub_candidates:
         print("SKIP: no Tawwab EPUB found for structured extract test")
         return
 
-    from book_format import format_epub_if_supported
+    from book_format import format_epub
 
     epub_path = epub_candidates[0]
-    formatted = format_epub_if_supported(epub_path)
+    try:
+        formatted = format_epub(epub_path)
+    except RuntimeError as exc:
+        print(f"SKIP: EPUB deps not installed ({exc})")
+        return
     assert formatted, "structured EPUB formatting failed"
 
     sections = split_into_audiobook_sections(formatted)
     assert sections[0].title == "Preface", sections[0].title
     assert all(s.title != "Opening" for s in sections)
-    assert all(s.title != "Commonly Asked Questions" for s in sections)
+    assert all(
+        s.title not in {"Commonly Asked Questions", "Self-Assessment Quiz"} for s in sections
+    )
     print(f"Structured EPUB: {len(formatted.split()):,} words, {len(sections)} sections")
 
 

@@ -508,187 +508,289 @@ def html_to_text(html_fragment: str) -> str:
     return clean_text(re.sub(r"\s+", " ", text))
 
 
-TAWWAB_SKIP_CLASSES = {
-    "x14-free-style-1-l",
-    "x14-free-style-1-r",
-    "x03-chapter-epigraph",
-    "x01-fm-front-sales-quote",
+# ---------------------------------------------------------------------------
+# General-purpose EPUB extraction (any publisher)
+# ---------------------------------------------------------------------------
+
+try:
+    from bs4 import BeautifulSoup, Tag
+    from bs4.element import NavigableString
+
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+    Tag = object  # type: ignore
+
+try:
+    import ebooklib
+    from ebooklib import epub as ebooklib_epub
+
+    EBOOKLIB_AVAILABLE = True
+except ImportError:
+    EBOOKLIB_AVAILABLE = False
+
+BLOCK_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote"})
+
+SKIP_EPUB_TYPES = frozenset({
+    "cover", "toc", "nav", "copyright-page", "titlepage", "dedication",
+    "contributors", "index", "landmarks", "pagebreak", "halftitlepage",
+    "list-of-illustrations", "list-of-tables", "lot", "loi", "abstract",
+    "colophon", "imprint", "seriespage", "volume", "frontmatter",
+})
+
+BACK_MATTER_STOP = frozenset({
+    "acknowledgments",
+    "acknowledgements",
+    "references",
+    "bibliography",
+    "index",
+    "about the author",
+    "also by",
+    "colophon",
+})
+
+END_OF_BOOK_MARKERS = BACK_MATTER_STOP | {
+    "self-assessment quiz",
+    "commonly asked questions",
 }
 
+CONTENT_START_RE = re.compile(
+    r"(?i)^(preface|introduction|prologue|foreword|"
+    r"chapter\s+(?:1|one)\b|part\s+(?:1|one|i)\b|chapter\s+1[:.])"
+)
 
-def classify_tawwab_element(tag: str, cls: str, text: str) -> str:
-    primary = cls.split()[0] if cls else ""
-    if tag == "blockquote" or primary in TAWWAB_SKIP_CLASSES:
+CHAPTER_HEADING_RE = re.compile(r"(?i)^(?:part\s+\d+\s*:?\s*.+|chapter\s+\d+[:.]?\s*.+)$")
+
+SKIP_CLASS_RE = re.compile(
+    r"(?i)(^|[\s_-])(toc|nav|cover|copyright|cip|titlepage|title-page|"
+    r"front-sales|sales-quote|pull-?quote|epigraph|advert|promo|"
+    r"landmark|navpoint|page-number|pagenum|footnote|endnote|"
+    r"free-style|dedf|pcon|quot(?:t)?)([\s_-]|$)"
+)
+
+MAJOR_CLASS_RE = re.compile(
+    r"(?i)(chapter-title|chaptertitle|part-title|parttitle|fm-head|"
+    r"chapter-head|part-head|^cn$|\bcn\b|x03-chapter-title|x02-part-title|x01-fm-head)"
+)
+
+BODY_CLASS_RE = re.compile(
+    r"(?i)(body-text|bodytext|paragraph|x04-body|x03-co-body|x13-bm|"
+    r"^paft$|\bpaft\b|^p$|\bp\b|text-body|prose)"
+)
+
+SECTION_CLASS_RE = re.compile(
+    r"(?i)(section-head|subhead|x05-head|^ah$|^bh$|^dh$|heading|head-a)"
+)
+
+
+def _element_classes(element: Tag) -> str:
+    classes = element.get("class") or []
+    return " ".join(classes)
+
+
+def _element_epub_type(element: Tag) -> str:
+    for key in ("epub:type", "epub_type"):
+        value = element.get(key)
+        if value:
+            return value.split()[0].lower()
+    return ""
+
+
+def _inside_skipped_container(element: Tag) -> bool:
+    for parent in element.parents:
+        if not isinstance(parent, Tag):
+            continue
+        if parent.name == "nav":
+            return True
+        role = (parent.get("role") or "").lower()
+        if role in {"doc-toc", "doc-pagelist", "doc-noteref", "doc-bibliography"}:
+            return True
+        epub_type = _element_epub_type(parent)
+        if epub_type in SKIP_EPUB_TYPES:
+            return True
+        if parent.name == "aside" and epub_type in {"toc", "footnote", "endnote"}:
+            return True
+    return False
+
+
+def _is_nav_document(html: str, item_name: str) -> bool:
+    lower_name = (item_name or "").lower()
+    if any(token in lower_name for token in ("nav", "toc", "cover")):
+        return True
+    if re.search(r"<nav\b", html, re.I):
+        if re.search(r'epub:type=["\']toc["\']', html, re.I):
+            return True
+    return False
+
+
+def _is_content_start(text: str, kind: str) -> bool:
+    if kind != "major":
+        return False
+    normalized = text.lower().strip().rstrip(".")
+    if normalized in {"preface", "introduction", "prologue", "foreword"}:
+        return True
+    return bool(CONTENT_START_RE.match(text.strip()))
+
+
+def _is_back_matter_stop(text: str, kind: str) -> bool:
+    normalized = text.lower().strip().rstrip(".?")
+    return normalized in END_OF_BOOK_MARKERS
+
+
+def _looks_like_toc_document(soup: BeautifulSoup) -> bool:
+    """Detect TOC/nav HTML files mislabeled as body content in the spine."""
+    chapter_like = 0
+    short_headings = 0
+    for element in soup.find_all(BLOCK_TAGS):
+        if not isinstance(element, Tag):
+            continue
+        text = clean_text(element.get_text(" ", strip=True))
+        if not text:
+            continue
+        if CHAPTER_HEADING_RE.match(text) or re.match(r"(?i)^chapter\s+\d+\s*:", text):
+            chapter_like += 1
+            if len(text.split()) <= 14:
+                short_headings += 1
+    return chapter_like >= 4 and short_headings >= max(3, chapter_like - 1)
+
+
+def _is_major_heading_text(text: str) -> bool:
+    normalized = text.lower().strip().rstrip(".")
+    if normalized in {"preface", "introduction", "prologue", "foreword", "epilogue"}:
+        return True
+    return bool(CHAPTER_HEADING_RE.match(text.strip()))
+
+
+def _classify_epub_element(element: Tag, text: str) -> str:
+    if not text or _inside_skipped_container(element):
         return "skip"
-    if primary == "x01-fm-copyright-logo":
+
+    tag = element.name.lower()
+    cls = _element_classes(element)
+    epub_type = _element_epub_type(element)
+
+    if epub_type in SKIP_EPUB_TYPES:
+        return "skip"
+
+    # Publisher-specific body classes (check before broad skip patterns).
+    if "copyright-logo" in cls.lower():
         if len(text.split()) <= 12 and not text.endswith(":"):
             return "skip"
         return "body"
-    if primary.startswith("x07-list"):
-        return "list"
-    if primary in {"x01-fm-head", "x03-chapter-title", "x02-part-title"}:
-        return "major"
-    if primary == "x03-chapter-number":
-        return "chapter_number"
-    if primary.startswith("x05-head"):
-        return "section"
-    if primary in {"x04-body-text", "x03-co-body-text", "x13-bm-text"}:
-        return "body"
-    return "skip"
+    if BODY_CLASS_RE.search(cls):
+        return "list" if tag == "li" else "body"
 
-
-def extract_tawwab_epub(epub_path: Path) -> list[SourceLine]:
-    source: list[SourceLine] = []
-    pending_chapter_num: str | None = None
-
-    with zipfile.ZipFile(epub_path) as zf:
-        html_files = sorted(
-            n
-            for n in zf.namelist()
-            if n.endswith(".html")
-            and (m := re.search(r"part(\d+)", n))
-            and int(m.group(1)) >= 5
-        )
-        for name in html_files:
-            data = zf.read(name).decode("utf-8", errors="replace")
-            for m in re.finditer(
-                r"<(h1|h2|h3|p|blockquote|li)[^>]*class=\"([^\"]*)\"[^>]*>(.*?)</\1>",
-                data,
-                re.S | re.I,
-            ):
-                tag, cls, inner = m.group(1).lower(), m.group(2), m.group(3)
-                text = html_to_text(inner)
-                if not text:
-                    continue
-                if text == "Acknowledgments" and "x01-fm-head" in cls:
-                    return source
-                kind = classify_tawwab_element(tag, cls, text)
-                if kind == "skip":
-                    continue
-                if kind == "chapter_number":
-                    pending_chapter_num = text
-                    continue
-                if kind == "major":
-                    if pending_chapter_num and "chapter" in cls:
-                        text = f"Chapter {pending_chapter_num}. {text.rstrip('.')}"
-                        pending_chapter_num = None
-                    source.append(SourceLine(text=text, tab_count=0, is_callout=False))
-                    continue
-                if kind == "section":
-                    source.append(SourceLine(text=text, tab_count=0, is_callout=False))
-                    continue
-                if kind == "list":
-                    source.append(SourceLine(text=text, tab_count=5, is_callout=False))
-                    continue
-                source.append(SourceLine(text=text, tab_count=3, is_callout=False))
-
-    return source
-
-
-GIBSON_SKIP_CLASSES = {"quot", "quott", "cip", "cipf", "dedf", "pcon", "toc", "cover"}
-
-
-def classify_gibson_element(cls: str, text: str) -> str:
-    primary = cls.split()[0] if cls else ""
-    if primary in GIBSON_SKIP_CLASSES:
+    if SKIP_CLASS_RE.search(cls):
         return "skip"
-    if primary == "cn":
+    if tag == "blockquote":
+        return "skip"
+
+    if MAJOR_CLASS_RE.search(cls) or (tag in {"h1", "h2"} and _is_major_heading_text(text)):
         return "major"
-    if primary in {"ah", "bh", "dh", "exh", "stf"}:
-        return "section"
-    if primary.startswith(("bl", "ul", "nl", "exul")):
-        return "list"
-    if primary in {"paft", "p", "st", "stl", "exf", "exl", "ex", "ans"}:
-        return "body"
+    if SECTION_CLASS_RE.search(cls) or tag in {"h3", "h4", "h5", "h6"}:
+        if len(text.split()) <= 18:
+            return "section"
+    if tag in {"p", "li"}:
+        return "list" if tag == "li" else "body"
     return "skip"
 
 
-def extract_gibson_epub(epub_path: Path) -> list[SourceLine]:
+def _iter_block_elements(soup: BeautifulSoup):
+    for element in soup.find_all(BLOCK_TAGS):
+        if not isinstance(element, Tag):
+            continue
+        if element.name == "p" and element.find_parent("li"):
+            continue
+        if element.name == "p" and element.find_parent("blockquote"):
+            continue
+        yield element
+
+
+def extract_epub(epub_path: Path) -> list[SourceLine]:
+    """
+    Extract audiobook-ready lines from any EPUB using spine order and semantic HTML.
+
+    Skips covers, TOCs, pull quotes, and nav landmarks; starts at preface/introduction/
+    chapter 1; stops at acknowledgments/references/index.
+    """
+    if not EBOOKLIB_AVAILABLE or not BS4_AVAILABLE:
+        raise RuntimeError("ebooklib and beautifulsoup4 are required for EPUB extraction")
+
+    book = ebooklib_epub.read_epub(str(epub_path))
     source: list[SourceLine] = []
-    with zipfile.ZipFile(epub_path) as zf:
-        data = zf.read("OEBPS/EPUB_Adult_Children_of_Emotionally_Immature_Parents_EPUB.xhtml").decode(
-            "utf-8", errors="replace"
-        )
-        started = False
-        for m in re.finditer(r"<p[^>]*class=\"([^\"]*)\"[^>]*>(.*?)</p>", data, re.S | re.I):
-            cls, inner = m.group(1), m.group(2)
-            primary = cls.split()[0]
-            text = html_to_text(inner)
+    started = False
+    pending_chapter_num: str | None = None
+    seen_major_titles: set[str] = set()
+
+    for item_id, _linear in book.spine:
+        item = book.get_item_with_id(item_id)
+        if not item or item.get_type() != ebooklib.ITEM_DOCUMENT:
+            continue
+
+        raw = item.get_content()
+        html = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        if _is_nav_document(html, item.get_name()):
+            continue
+
+        soup = BeautifulSoup(html, "html.parser")
+        if _looks_like_toc_document(soup):
+            continue
+
+        for element in _iter_block_elements(soup):
+            text = clean_text(element.get_text(" ", strip=True))
             if not text:
                 continue
-            if not started:
-                if primary == "cn" and text == "Introduction" and "_idTextAnchor001" in m.group(0):
-                    started = True
-                else:
-                    continue
-            if primary == "cn" and text == "References":
-                break
-            kind = classify_gibson_element(cls, text)
+
+            cls = _element_classes(element)
+            if re.fullmatch(r"\d{1,2}", text) and "chapter-number" in cls.lower():
+                pending_chapter_num = text
+                continue
+
+            kind = _classify_epub_element(element, text)
             if kind == "skip":
                 continue
+
+            if not started:
+                if not _is_content_start(text, kind):
+                    continue
+                started = True
+
+            if _is_back_matter_stop(text, kind):
+                return source
+
+            if kind == "major":
+                if pending_chapter_num:
+                    text = f"Chapter {pending_chapter_num}. {text.rstrip('.')}"
+                    pending_chapter_num = None
+                title_key = text.lower().strip()
+                if title_key in seen_major_titles:
+                    continue
+                seen_major_titles.add(title_key)
+                source.append(SourceLine(text=text, tab_count=0, is_callout=False))
+                continue
+
+            if kind == "section":
+                source.append(SourceLine(text=text, tab_count=0, is_callout=False))
+                continue
+
             tab_count = 5 if kind == "list" else 3
             source.append(SourceLine(text=text, tab_count=tab_count, is_callout=False))
+
     return source
 
 
-def find_epub(base: Path, stem: str) -> Path | None:
-    exact = base / f"{stem}.epub"
-    if exact.exists():
-        return exact
-    words = stem.split()[:4]
-    for path in base.glob("*.epub"):
-        if all(w in path.name for w in words[:3]):
-            return path
-    return None
-
-
-def format_book_from_epub(epub_path: Path, book: str) -> str:
-    if book == "tawwab":
-        source = extract_tawwab_epub(epub_path)
-    else:
-        source = extract_gibson_epub(epub_path)
+def format_epub(epub_path: Path) -> str | None:
+    """Extract and format any EPUB for audiobook TTS."""
+    source = extract_epub(epub_path)
+    if not source:
+        return None
     processed = process_lines(source)
     return normalize_whitespace("\n".join(processed))
-
-
-def detect_epub_profile(epub_path: Path) -> str | None:
-    """Return 'tawwab', 'gibson', or None if this EPUB has no structured profile."""
-    try:
-        with zipfile.ZipFile(epub_path) as zf:
-            names = zf.namelist()
-            if any("EPUB_Adult_Children_of_Emotionally" in n for n in names):
-                return "gibson"
-            for name in names:
-                if not name.lower().endswith((".html", ".xhtml", ".htm")):
-                    continue
-                head = zf.read(name).decode("utf-8", errors="replace")[:100000]
-                if any(
-                    marker in head
-                    for marker in ("x04-body-text", "x03-chapter-title", "x02-part-title")
-                ):
-                    return "tawwab"
-    except Exception:
-        return None
-    return None
 
 
 def format_epub_if_supported(epub_path: Path) -> str | None:
-    """
-    Extract and format EPUB text when a known book profile is detected.
-
-    Skips front-matter blurbs, pull quotes, and back matter that raw HTML
-    extraction would incorrectly treat as chapters.
-    """
-    profile = detect_epub_profile(epub_path)
-    if profile == "tawwab":
-        source = extract_tawwab_epub(epub_path)
-    elif profile == "gibson":
-        source = extract_gibson_epub(epub_path)
-    else:
+    """Extract and format an EPUB. Returns None only when no readable content is found."""
+    try:
+        return format_epub(epub_path)
+    except RuntimeError:
         return None
-
-    if not source:
-        return None
-
-    processed = process_lines(source)
-    return normalize_whitespace("\n".join(processed))

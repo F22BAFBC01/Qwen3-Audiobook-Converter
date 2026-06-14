@@ -413,10 +413,10 @@ class QwenAudiobookConverter:
         raise RuntimeError("All EPUB extraction methods failed")
 
     def _extract_epub_structured(self, file_path: Path) -> str:
-        """Use semantic EPUB profiles (skips blurbs, TOC noise, back matter)."""
+        """Extract EPUB via semantic HTML (skips blurbs, TOC, back matter)."""
         formatted = format_epub_if_supported(file_path)
         if not formatted:
-            raise ValueError("No structured EPUB profile matched")
+            raise ValueError("Structured EPUB extraction returned no content")
         self.logger.info(
             f"Structured EPUB formatting applied ({len(formatted.split()):,} words)"
         )
