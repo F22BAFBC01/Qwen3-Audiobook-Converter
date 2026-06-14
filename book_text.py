@@ -278,7 +278,7 @@ def merge_continuation_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, 
 def format_heading_for_tts(text: str) -> str:
     """Prefix for headings merged into the following body (TTS pauses after quoted title)."""
     line = _first_line(text).strip().rstrip(".")
-    return f'"{line}."'
+    return f'"{line}\u2014"'
 
 
 def is_attachable_heading(text: str, pause_before_ms: int = 0) -> bool:

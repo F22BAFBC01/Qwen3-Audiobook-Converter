@@ -144,8 +144,8 @@ def test_heading_merged_into_body():
         ("You feel overwhelmed.", PAUSE_PARAGRAPH_MS),
     ]
     merged = merge_heading_blocks(blocks)
-    assert merged[0][0].startswith('"Introduction." I\'ve been')
-    assert merged[1][0].startswith('"Signs That You Need Boundaries." You feel')
+    assert merged[0][0].startswith('"Introduction\u2014" I\'ve been')
+    assert merged[1][0].startswith('"Signs That You Need Boundaries\u2014" You feel')
 
 
 def test_export_chunks_are_large_batches():
@@ -165,7 +165,7 @@ def test_export_chunks_are_large_batches():
     intro = next(s for s in split_into_audiobook_sections(text) if s.title == "Introduction")
     chunks = split_into_tts_chunks(intro.text, max_words=1500, for_section=True)
     assert len(chunks) < 50, f"expected few export chunks, got {len(chunks)}"
-    assert chunks[0].text.startswith('"Introduction."'), chunks[0].text[:80]
+    assert chunks[0].text.startswith('"Introduction\u2014"'), chunks[0].text[:80]
     assert chunks[0].speech_role == "body"
     print(f"Introduction: {len(chunks)} export chunks, first opens: {chunks[0].text[:70]}...")
 
@@ -199,8 +199,8 @@ def test_merge_continuation_blocks():
 
 
 def test_format_heading_for_tts():
-    assert format_heading_for_tts("Preface.") == '"Preface."'
-    assert format_heading_for_tts("Chapter 2. The Cost") == '"Chapter 2. The Cost."'
+    assert format_heading_for_tts("Preface.") == '"Preface\u2014"'
+    assert format_heading_for_tts("Chapter 2. The Cost") == '"Chapter 2. The Cost\u2014"'
 
 
 if __name__ == "__main__":
