@@ -13,3 +13,4 @@ beautifulsoup4>=4.11.0
 # Audio processing
 # Note: ffmpeg is required for pydub audio processing
 # Install separately: https://ffmpeg.org/download.html
+mutagen>=1.47.0

@@ -29,7 +29,14 @@ from pydub import AudioSegment
 from pydub.exceptions import CouldntDecodeError
 from gradio_client import Client, handle_file
 
-from book_text import TextChunk, clean_text_preserve_structure, split_into_tts_chunks
+from book_text import (
+    AudiobookSection,
+    TextChunk,
+    clean_text_preserve_structure,
+    split_into_audiobook_sections,
+    split_into_tts_chunks,
+)
+from mp3_tags import tag_audiobook_section
 
 # Fix Windows console encoding for emoji/unicode
 if sys.platform == 'win32':
@@ -541,7 +548,7 @@ class QwenAudiobookConverter:
         results: Optional[Dict[int, bool]] = None,
         chunk_pauses: Optional[List[int]] = None,
     ) -> bool:
-        """Combine audio chunks into final audiobook"""
+        """Combine audio chunks into one section MP3."""
         try:
             combined = AudioSegment.empty()
             successful = 0
@@ -580,8 +587,8 @@ class QwenAudiobookConverter:
                 self.logger.warning(f"Missing chunks: {missing_chunks}")
 
             combined.export(str(output_path), format=AUDIO_FORMAT, bitrate=AUDIO_BITRATE)
-            self.logger.info(f"Audiobook saved: {output_path} ({successful}/{total_chunks} chunks)")
-            print(f"[INFO] Saved audiobook: {output_path.name} ({successful}/{total_chunks} chunks)")
+            self.logger.info(f"Section saved: {output_path} ({successful}/{total_chunks} chunks)")
+            print(f"[INFO] Saved section: {output_path.name} ({successful}/{total_chunks} chunks)")
             if missing_chunks:
                 print(f"[WARNING] Missing chunks: {missing_chunks}")
             return True
@@ -621,13 +628,78 @@ class QwenAudiobookConverter:
         except Exception as e:
             self.logger.warning(f"Cleanup failed: {e}")
 
+    def convert_section(
+        self,
+        section: AudiobookSection,
+        output_path: Path,
+        book_title: str,
+        total_sections: int,
+    ) -> bool:
+        """Convert one audiobook section (chapter) to a single MP3 file."""
+        chunks = self.split_into_chunks(section.text)
+        total_chunks = len(chunks)
+        if total_chunks == 0:
+            self.logger.error(f"No chunks for section: {section.title}")
+            return False
+
+        chunk_sizes = [len(chunk.text.split()) for chunk in chunks]
+        pause_count = sum(1 for chunk in chunks if chunk.pause_before_ms > 0)
+        avg_chunk_size = sum(chunk_sizes) / len(chunk_sizes) if chunk_sizes else 0
+        self.logger.info(
+            f"Section {section.track_number}/{total_sections} '{section.title}': "
+            f"{total_chunks} chunks (avg {avg_chunk_size:.0f} words, {pause_count} pauses)"
+        )
+        print(
+            f"\n{'=' * 50}\n"
+            f"SECTION {section.track_number}/{total_sections}: {section.title}\n"
+            f"{total_chunks} TTS chunks (~{total_chunks * 4} min)\n"
+            f"{'=' * 50}"
+        )
+
+        chunk_args = [(i + 1, chunk.text) for i, chunk in enumerate(chunks)]
+        chunk_pauses = [chunk.pause_before_ms for chunk in chunks]
+        results: Dict[int, bool] = {}
+
+        for chunk_num, chunk_text in chunk_args:
+            try:
+                result = self.process_chunk_with_retry((chunk_num, chunk_text))
+                results[chunk_num] = result
+                status = "OK" if result else "FAIL"
+                print(f"[{status}] Section {section.track_number} chunk {chunk_num:3d}/{total_chunks}")
+            except Exception as e:
+                results[chunk_num] = False
+                print(f"[ERROR] Section {section.track_number} chunk {chunk_num:3d}/{total_chunks}: {e}")
+
+        successful_chunks = sum(1 for value in results.values() if value)
+        if successful_chunks == 0:
+            self.logger.error(f"Section failed: {section.title}")
+            self.cleanup_chunks()
+            return False
+
+        if successful_chunks < total_chunks:
+            self.logger.warning(
+                f"Section '{section.title}': only {successful_chunks}/{total_chunks} chunks succeeded"
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        success = self.combine_chunks(total_chunks, output_path, results, chunk_pauses)
+        if success:
+            tag_audiobook_section(
+                output_path,
+                track_number=section.track_number,
+                total_tracks=total_sections,
+                title=section.title,
+                album=book_title,
+            )
+        self.cleanup_chunks()
+        return success
+
     def convert_book(self, file_path: Path) -> bool:
-        """Convert a single book to audiobook using Qwen API"""
+        """Convert a single book to a folder of section MP3 files."""
         self.logger.info(f"Converting: {file_path.name}")
         start_time = time.time()
 
         try:
-            # Extract text
             self.logger.info("Extracting text...")
             text = self.extract_text_from_file(file_path)
             if not text.strip():
@@ -636,92 +708,55 @@ class QwenAudiobookConverter:
 
             self.logger.info(f"Extracted {len(text)} characters ({len(text.split())} words)")
 
-            # Split into chunks (respects blank-line pauses in formatted audiobook text)
-            chunks = self.split_into_chunks(text)
-            total_chunks = len(chunks)
-            if total_chunks == 0:
-                self.logger.error("No chunks created")
+            sections = split_into_audiobook_sections(text)
+            if not sections:
+                self.logger.error("No audiobook sections detected")
                 return False
 
-            # Log chunk info
-            chunk_sizes = [len(chunk.text.split()) for chunk in chunks]
-            pause_count = sum(1 for chunk in chunks if chunk.pause_before_ms > 0)
-            avg_chunk_size = sum(chunk_sizes) / len(chunk_sizes) if chunk_sizes else 0
-            self.logger.info(
-                f"Split into {total_chunks} chunks (avg {avg_chunk_size:.0f} words, "
-                f"{pause_count} pauses from paragraph/section breaks)"
-            )
-            print(f"[INFO] Processing {total_chunks} chunks via Qwen API...")
-            print(f"[INFO] {pause_count} structural pauses will be inserted between sections")
-            print(f"[INFO] Estimated time: ~{total_chunks * 4} minutes (4 min per chunk)")
+            book_title = file_path.stem
+            output_dir = Path(AUDIOBOOKS_FOLDER) / book_title
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Process chunks - process in order to ensure correct naming
-            chunk_args = [(i + 1, chunk.text) for i, chunk in enumerate(chunks)]
-            chunk_pauses = [chunk.pause_before_ms for chunk in chunks]
+            print(f"[INFO] Split into {len(sections)} sections (one MP3 per chapter/equivalent)")
+            for section in sections:
+                print(f"  {section.track_number:>2}. {section.title} -> {section.filename}")
 
-            print(f"\n{'=' * 50}")
-            print(f"PROCESSING {total_chunks} CHUNKS")
-            print(f"{'=' * 50}")
-
-            # Track results by chunk number
-            results = {}  # chunk_num -> success (bool)
-            
-            # Process chunks sequentially to ensure correct order and naming
-            # This ensures chunks are named 1, 2, 3, 4... in order
-            for chunk_num, chunk_text in chunk_args:
+            results: Dict[str, bool] = {}
+            for section in sections:
+                section_path = output_dir / Path(section.filename).with_suffix(f".{AUDIO_FORMAT}")
                 try:
-                    result = self.process_chunk_with_retry((chunk_num, chunk_text))
-                    results[chunk_num] = result
-                    
-                    if result:
-                        print(f"[OK] Chunk {chunk_num:3d}/{total_chunks} completed")
-                        self.logger.info(f"+ Chunk {chunk_num}/{total_chunks} completed")
-                    else:
-                        print(f"[FAIL] Chunk {chunk_num:3d}/{total_chunks} FAILED")
-                        self.logger.error(f"- Chunk {chunk_num}/{total_chunks} failed")
-                        
+                    results[section.filename] = self.convert_section(
+                        section,
+                        section_path,
+                        book_title=book_title,
+                        total_sections=len(sections),
+                    )
+                except KeyboardInterrupt:
+                    raise
                 except Exception as e:
-                    results[chunk_num] = False
-                    print(f"[ERROR] Chunk {chunk_num:3d}/{total_chunks} ERROR: {e}")
-                    self.logger.error(f"- Chunk {chunk_num}/{total_chunks} error: {e}")
+                    self.logger.error(f"Section '{section.title}' failed: {e}")
+                    results[section.filename] = False
 
-            successful_chunks = sum(1 for v in results.values() if v)
+            successful = sum(1 for value in results.values() if value)
+            duration = time.time() - start_time
+            minutes = int(duration // 60)
+            seconds = int(duration % 60)
+
             print(f"\n{'=' * 50}")
-            print(f"CHUNK PROCESSING COMPLETE")
-            print(f"Successful: {successful_chunks}/{total_chunks}")
+            print(f"BOOK COMPLETE: {successful}/{len(sections)} sections")
+            print(f"Output folder: {output_dir}")
+            print(f"Time: {minutes}m {seconds}s")
             print(f"{'=' * 50}")
-            self.logger.info(f"Qwen processing completed: {successful_chunks}/{total_chunks} chunks")
 
-            if successful_chunks == 0:
-                self.logger.error("No chunks were successfully processed")
-                self.cleanup_chunks()  # Cleanup even on failure
-                return False
+            for filename, ok in results.items():
+                print(f"{'[OK]' if ok else '[FAIL]'} {filename}")
 
-            if successful_chunks < total_chunks:
-                self.logger.warning(f"Only {successful_chunks}/{total_chunks} chunks succeeded. Proceeding with partial audiobook.")
-
-            # Combine chunks (only the successful ones)
-            output_path = Path(AUDIOBOOKS_FOLDER) / f"{file_path.stem}.{AUDIO_FORMAT}"
-            success = self.combine_chunks(total_chunks, output_path, results, chunk_pauses)
-
-            if success:
-                duration = time.time() - start_time
-                minutes = int(duration // 60)
-                seconds = int(duration % 60)
-                self.logger.info(f"Conversion completed in {minutes}m {seconds}s: {output_path}")
-                print(f"[SUCCESS] Conversion completed in {minutes}m {seconds}s")
-            else:
-                self.logger.error("Failed to combine chunks into final audiobook")
-
-            # Always cleanup, even on failure
-            self.cleanup_chunks()
-            return success
+            return successful > 0
 
         except Exception as e:
             self.logger.error(f"Conversion failed: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-            # Cleanup on exception
             self.cleanup_chunks()
             return False
 
@@ -803,7 +838,7 @@ class QwenAudiobookConverter:
             print(f"{status} {filename}")
 
         if successful > 0:
-            print(f"\n[INFO] Audiobooks saved to: {AUDIOBOOKS_FOLDER}/")
+            print(f"\n[INFO] Audiobook sections saved to: {AUDIOBOOKS_FOLDER}/<book title>/")
 
 
 def main():

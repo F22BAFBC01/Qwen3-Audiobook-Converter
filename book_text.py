@@ -12,11 +12,48 @@ PAUSE_PARAGRAPH_MS = 600
 PAUSE_SECTION_MS = 1500
 PAUSE_MAJOR_MS = 2500
 
+FRONT_MATTER_TITLES = {
+    "preface",
+    "introduction",
+    "prologue",
+    "foreword",
+    "opening credits",
+    "opening",
+    "dedication",
+    "copyright",
+    "title page",
+    "epilogue",
+    "afterword",
+    "conclusion",
+    "appendix",
+    "acknowledgments",
+    "acknowledgements",
+    "commonly asked questions",
+    "self-assessment quiz",
+    "references",
+    "closing credits",
+    "closing",
+}
+
+CHAPTER_TITLE_RE = re.compile(
+    r"(?i)^(?:part\s+\d+\s*:?\s*.+|chapter\s+\d+\.?\s*.+)$"
+)
+
 
 @dataclass(frozen=True)
 class TextChunk:
     text: str
     pause_before_ms: int = 0
+
+
+@dataclass(frozen=True)
+class AudiobookSection:
+    """One exported MP3 track (ACX-style section/chapter)."""
+
+    track_number: int
+    title: str
+    text: str
+    filename: str
 
 
 def clean_text_preserve_structure(text: str) -> str:
@@ -177,3 +214,102 @@ def split_into_tts_chunks(text: str, max_words: int) -> list[TextChunk]:
             )
 
     return chunks
+
+
+def _first_line(text: str) -> str:
+    return text.split("\n", 1)[0].strip()
+
+
+def is_section_title(text: str) -> bool:
+    """True when a text block begins a new audiobook track (chapter or equivalent)."""
+    line = _first_line(text)
+    if not line or line.lower().startswith("question:"):
+        return False
+    if CHAPTER_TITLE_RE.match(line):
+        return True
+    normalized = line.lower().rstrip(".")
+    if normalized in FRONT_MATTER_TITLES:
+        return True
+    if "\n" in text:
+        return False
+    if len(line.split()) > 12:
+        return False
+    if not line.endswith("."):
+        return False
+    if normalized.startswith(("part ", "chapter ")):
+        return True
+    return False
+
+
+def extract_section_title(text: str) -> str:
+    line = _first_line(text).rstrip(".")
+    return line or "Section"
+
+
+def sanitize_section_filename(title: str) -> str:
+    """ACX-style safe filename fragment: alphanumeric, dashes, underscores."""
+    cleaned = re.sub(r"[^\w\s-]", "", title, flags=re.UNICODE)
+    cleaned = re.sub(r"[\s-]+", "_", cleaned.strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned[:80] or "Section"
+
+
+def section_filename(track_number: int, total_tracks: int, title: str) -> str:
+    """Build `{NN}_{Section_Title}.mp3` with zero-padding for correct sort order."""
+    width = max(2, len(str(total_tracks)))
+    safe_title = sanitize_section_filename(title)
+    return f"{track_number:0{width}d}_{safe_title}.mp3"
+
+
+def split_into_audiobook_sections(text: str) -> list[AudiobookSection]:
+    """
+    Split formatted audiobook text into export sections.
+
+    Follows retail/ACX conventions: one file per TOC entry — preface, introduction,
+    and each chapter heading that appears as its own titled block in the source text.
+    """
+    blocks = parse_text_blocks(text)
+    if not blocks and text.strip():
+        blocks = [(text.strip(), 0)]
+
+    grouped: list[tuple[str, list[str]]] = []
+    current_title: str | None = None
+    current_blocks: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_title, current_blocks
+        if not current_blocks:
+            return
+        title = current_title or extract_section_title(current_blocks[0])
+        grouped.append((title, list(current_blocks)))
+        current_title = None
+        current_blocks = []
+
+    for block_text, _pause_ms in blocks:
+        if is_section_title(block_text):
+            flush()
+            current_title = extract_section_title(block_text)
+            current_blocks = [block_text]
+        else:
+            if not current_blocks:
+                current_title = "Opening"
+            current_blocks.append(block_text)
+
+    flush()
+
+    if not grouped and text.strip():
+        grouped = [("Opening", [text.strip()])]
+
+    total = len(grouped)
+    sections: list[AudiobookSection] = []
+    for index, (title, block_texts) in enumerate(grouped, start=1):
+        section_text = "\n\n".join(block_texts)
+        sections.append(
+            AudiobookSection(
+                track_number=index,
+                title=title,
+                text=section_text,
+                filename=section_filename(index, total, title),
+            )
+        )
+    return sections

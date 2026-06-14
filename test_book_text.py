@@ -8,6 +8,7 @@ from book_text import (
     PAUSE_PARAGRAPH_MS,
     PAUSE_SECTION_MS,
     parse_text_blocks,
+    split_into_audiobook_sections,
     split_into_tts_chunks,
 )
 
@@ -48,7 +49,29 @@ def test_formatted_audiobook_sample():
         print(f"  [{chunk.pause_before_ms}ms] {preview}...")
 
 
+def test_audiobook_sections():
+    sample = Path(__file__).resolve().parent.parent / (
+        "Set Boundaries, Find Peace - Nedra Glover Tawwab (audiobook).txt"
+    )
+    if not sample.exists():
+        print("SKIP: audiobook sample not found")
+        return
+
+    text = sample.read_text(encoding="utf-8")
+    sections = split_into_audiobook_sections(text)
+    assert len(sections) >= 10, f"expected many sections, got {len(sections)}"
+    assert sections[0].title == "Preface"
+    assert sections[0].filename.startswith("01_")
+    assert sections[1].title == "Introduction"
+    assert any(s.title.startswith("Chapter 2") for s in sections)
+
+    print(f"Sections: {len(sections)}")
+    for section in sections:
+        print(f"  {section.track_number:02d} {section.filename} ({len(section.text.split())} words)")
+
+
 if __name__ == "__main__":
     test_blank_line_pauses()
     test_formatted_audiobook_sample()
+    test_audiobook_sections()
     print("OK")

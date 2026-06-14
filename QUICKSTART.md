@@ -67,7 +67,17 @@ The converter preserves paragraph/chapter breaks from your text file and inserts
 
 ## Step 6: Find Your Audiobook
 
-Your completed audiobook will be in the `audiobooks/` folder!
+Your completed audiobook will be in `audiobooks/<book title>/` as numbered section files:
+
+```
+audiobooks/My Book/
+  01_Preface.mp3
+  02_Introduction.mp3
+  03_Chapter_2_The_Cost_of_Not_Having_Healthy_Boundaries.mp3
+  ...
+```
+
+Each file is one chapter or front/back-matter section (ACX-style). ID3 tags include track number, section title, and book title for proper sorting in audiobook apps.
 
 ## Troubleshooting
 
