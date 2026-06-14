@@ -35,6 +35,10 @@ FRONT_MATTER_TITLES = {
     "closing",
 }
 
+# Target size for one voice-clone API call (coherent passage, not paragraph/export bound).
+SYNTHESIS_MAX_WORDS = 450
+SYNTHESIS_MAX_CHARS = 4000
+
 CHAPTER_TITLE_RE = re.compile(
     r"(?i)^(?:part\s+\d+\s*:?\s*.+|chapter\s+\d+[:.]?\s*.+)$"
 )
@@ -317,39 +321,69 @@ def merge_heading_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]
     return merged
 
 
-def group_blocks_for_export(
-    blocks: list[tuple[str, int]], max_words: int
-) -> list[tuple[list[str], int]]:
+def group_blocks_for_synthesis(
+    blocks: list[tuple[str, int]],
+    max_words: int = SYNTHESIS_MAX_WORDS,
+    max_chars: int = SYNTHESIS_MAX_CHARS,
+) -> list[tuple[str, int]]:
     """
-    Group paragraph blocks into large export chunks (~pre-fork 1500-word batches).
+    Group paragraph blocks into coherent voice-synthesis units (one API call each).
 
-    Pauses are only between export chunks (and paragraph pauses are applied during
-    voice-clone synthesis), not between sentences.
+    Blank-line pause markers from source markup define subsection boundaries
+    (PAUSE_SECTION_MS and above). Paragraph-level pauses stay inside the same unit
+    until word/char caps force a split at a block boundary.
     """
-    groups: list[tuple[list[str], int]] = []
-    current: list[str] = []
+    units: list[tuple[str, int]] = []
+    current_parts: list[str] = []
     current_words = 0
-    group_pause = 0
+    current_chars = 0
+    unit_pause = 0
+
+    def flush() -> None:
+        nonlocal current_parts, current_words, current_chars, unit_pause
+        if not current_parts:
+            return
+        units.append(("\n\n".join(current_parts), unit_pause))
+        current_parts = []
+        current_words = 0
+        current_chars = 0
 
     for block_text, pause_ms in blocks:
         block_words = len(block_text.split())
-        if current and current_words + block_words > max_words:
-            groups.append((current, group_pause))
-            current = []
-            current_words = 0
-            group_pause = pause_ms
-        if not current:
-            group_pause = pause_ms
-        current.append(block_text)
+        block_chars = len(block_text)
+
+        if current_parts and pause_ms >= PAUSE_SECTION_MS:
+            flush()
+
+        if current_parts and (
+            current_words + block_words > max_words
+            or current_chars + 2 + block_chars > max_chars
+        ):
+            flush()
+            pause_ms = PAUSE_PARAGRAPH_MS
+
+        if not current_parts:
+            unit_pause = pause_ms
+
+        current_parts.append(block_text)
         current_words += block_words
+        current_chars = len("\n\n".join(current_parts))
 
-    if current:
-        groups.append((current, group_pause))
-    return groups
+    flush()
+    return units
 
 
-def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = False) -> list[TextChunk]:
-    """Split text into large export chunks with pause metadata (paragraph/s section only)."""
+def split_into_tts_chunks(
+    text: str,
+    max_words: int | None = None,
+    *,
+    max_chars: int = SYNTHESIS_MAX_CHARS,
+    for_section: bool = False,
+) -> list[TextChunk]:
+    """Split text into synthesis units with pause metadata (one Gradio call per unit)."""
+    if max_words is None:
+        max_words = SYNTHESIS_MAX_WORDS
+
     if for_section:
         text = prepare_section_text_for_tts(text)
 
@@ -357,10 +391,15 @@ def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = Fals
     if not blocks and text.strip():
         blocks = [(text.strip(), 0)]
 
+    if not for_section:
+        blocks = merge_continuation_blocks(blocks)
+        blocks = merge_heading_blocks(blocks)
+
     chunks: list[TextChunk] = []
-    for group_blocks, pause_ms in group_blocks_for_export(blocks, max_words):
-        if len(group_blocks) == 1 and len(group_blocks[0].split()) > max_words:
-            for sub_index, sub_text in enumerate(split_block_into_chunks(group_blocks[0], max_words)):
+    for unit_text, pause_ms in group_blocks_for_synthesis(blocks, max_words, max_chars):
+        unit_words = len(unit_text.split())
+        if unit_words > max_words or len(unit_text) > max_chars:
+            for sub_index, sub_text in enumerate(split_block_into_chunks(unit_text, max_words)):
                 chunks.append(
                     TextChunk(
                         text=sub_text,
@@ -370,10 +409,9 @@ def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = Fals
                 )
             continue
 
-        chunk_text = "\n\n".join(group_blocks)
         chunks.append(
             TextChunk(
-                text=chunk_text,
+                text=unit_text,
                 pause_before_ms=pause_ms,
                 speech_role="body",
             )

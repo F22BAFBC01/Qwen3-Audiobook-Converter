@@ -7,8 +7,10 @@ from book_text import (
     PAUSE_MAJOR_MS,
     PAUSE_PARAGRAPH_MS,
     PAUSE_SECTION_MS,
+    SYNTHESIS_MAX_WORDS,
     blocks_to_text,
     format_heading_for_tts,
+    group_blocks_for_synthesis,
     merge_continuation_blocks,
     merge_heading_blocks,
     parse_text_blocks,
@@ -38,15 +40,15 @@ def test_formatted_audiobook_sample():
         return
 
     text = sample.read_text(encoding="utf-8")
-    chunks = split_into_tts_chunks(text, max_words=1500)
+    chunks = split_into_tts_chunks(text)
 
     assert chunks, "expected chunks from audiobook sample"
     assert any(c.pause_before_ms == PAUSE_MAJOR_MS for c in chunks), "expected major pauses"
     assert any(c.pause_before_ms == PAUSE_SECTION_MS for c in chunks), "expected section pauses"
-    assert all(len(c.text.split()) <= 1500 for c in chunks), "chunks exceed word limit"
+    assert all(len(c.text.split()) <= SYNTHESIS_MAX_WORDS for c in chunks), "chunks exceed word limit"
 
     major = [c for c in chunks if c.pause_before_ms == PAUSE_MAJOR_MS][:5]
-    print(f"Total chunks: {len(chunks)}")
+    print(f"Total synthesis units: {len(chunks)}")
     print(f"Major pauses: {sum(1 for c in chunks if c.pause_before_ms == PAUSE_MAJOR_MS)}")
     print(f"Section pauses: {sum(1 for c in chunks if c.pause_before_ms == PAUSE_SECTION_MS)}")
     print(f"Paragraph pauses: {sum(1 for c in chunks if c.pause_before_ms == PAUSE_PARAGRAPH_MS)}")
@@ -148,10 +150,24 @@ def test_heading_merged_into_body():
     assert merged[1][0].startswith('"Signs That You Need Boundaries\u2014"\n\nYou feel')
 
 
-def test_export_chunks_are_large_batches():
+def test_synthesis_splits_at_section_pause():
+    blocks = [
+        ('"Introduction\u2014"\n\nFirst subsection paragraph.', 0),
+        ("Second paragraph in same subsection.", PAUSE_PARAGRAPH_MS),
+        ('"Signs That You Need Boundaries\u2014"\n\nSubsection body.', PAUSE_SECTION_MS),
+        ("Another paragraph.", PAUSE_PARAGRAPH_MS),
+    ]
+    units = group_blocks_for_synthesis(blocks)
+    assert len(units) == 2
+    assert units[0][0].count("\n\n") >= 2
+    assert "Second paragraph" in units[0][0]
+    assert units[1][0].startswith('"Signs That You Need Boundaries')
+
+
+def test_synthesis_units_group_by_structure():
     epub_candidates = list(Path(__file__).resolve().parent.parent.glob("*Tawwab*.epub"))
     if not epub_candidates:
-        print("SKIP: no EPUB for export chunk test")
+        print("SKIP: no EPUB for synthesis unit test")
         return
 
     from book_format import format_epub
@@ -162,12 +178,22 @@ def test_export_chunks_are_large_batches():
         print(f"SKIP: EPUB deps not installed ({exc})")
         return
 
-    intro = next(s for s in split_into_audiobook_sections(text) if s.title == "Introduction")
-    chunks = split_into_tts_chunks(intro.text, max_words=1500, for_section=True)
-    assert len(chunks) < 50, f"expected few export chunks, got {len(chunks)}"
-    assert '"Introduction\u2014"\n\n' in chunks[0].text, chunks[0].text[:120]
-    assert chunks[0].speech_role == "body"
-    print(f"Introduction: {len(chunks)} export chunks, first opens: {chunks[0].text[:70]}...")
+    sections = split_into_audiobook_sections(text)
+    preface = next(s for s in sections if s.title == "Preface")
+    intro = next(s for s in sections if s.title == "Introduction")
+
+    preface_units = split_into_tts_chunks(preface.text, for_section=True)
+    intro_units = split_into_tts_chunks(intro.text, for_section=True)
+
+    assert len(preface_units) == 1, f"Preface should be one synthesis unit, got {len(preface_units)}"
+    assert '"Preface\u2014"\n\n' in preface_units[0].text
+    assert len(intro_units) > 1, "Introduction has subsections — expect multiple synthesis units"
+    assert '"Introduction\u2014"\n\n' in intro_units[0].text
+    print(
+        f"Preface: {len(preface_units)} unit(s); "
+        f"Introduction: {len(intro_units)} units; "
+        f"first intro unit: {intro_units[0].text[:70]}..."
+    )
 
 
 def test_word_limit_splits_have_no_mid_paragraph_pause():
@@ -214,5 +240,6 @@ if __name__ == "__main__":
     test_formatted_audiobook_sample()
     test_audiobook_sections()
     test_structured_epub_matches_audiobook_sample()
-    test_export_chunks_are_large_batches()
+    test_synthesis_splits_at_section_pause()
+    test_synthesis_units_group_by_structure()
     print("OK")

@@ -31,8 +31,8 @@ from gradio_client import Client, handle_file
 
 from book_text import (
     AudiobookSection,
+    SYNTHESIS_MAX_WORDS,
     TextChunk,
-    PAUSE_PARAGRAPH_MS,
     clean_text_preserve_structure,
     split_into_audiobook_sections,
     split_into_tts_chunks,
@@ -80,8 +80,9 @@ CUSTOM_VOICE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 VOICE_CLONE_LANGUAGE = "English"
 VOICE_CLONE_USE_XVECTOR_ONLY = False
 VOICE_CLONE_MODEL_SIZE = "1.7B"  # Always use 1.7B
-# Voice clone: one Gradio call per paragraph (or whole export chunk text). The API splits
-# target_text at punctuation using max_chunk_chars; chunk_gap sets pause between those splits.
+# Voice clone: one Gradio call per synthesis unit (coherent passage from book_text).
+# The API splits target_text at punctuation (max_chunk_chars) with chunk_gap between
+# those internal pieces — not separate HTTP calls.
 VOICE_CLONE_MAX_CHUNK_CHARS = 500
 VOICE_CLONE_CHUNK_GAP = 0.25  # seconds between API-internal chunks (punctuation splits)
 VOICE_CLONE_SEED = -1
@@ -92,7 +93,6 @@ VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
 BOOKS_FOLDER = "book_to_convert"  # Input folder
 AUDIOBOOKS_FOLDER = "audiobooks"  # Output folder
 CHUNK_SIZE_WORDS_CUSTOM = 600
-CHUNK_SIZE_WORDS_VOICE_CLONE = 1500  # Pre-fork export chunk size (~7 min per chunk file)
 MAX_WORKERS = 1  # Keep at 1 to avoid rate limiting
 AUDIO_FORMAT = "mp3"
 AUDIO_BITRATE = "128k"
@@ -280,7 +280,7 @@ class QwenAudiobookConverter:
             if self.voice_mode == "custom_voice":
                 result = self._generate_custom_voice(text, speech_role=speech_role)
             elif self.voice_mode == "voice_clone":
-                result = self._generate_voice_clone_stitched(text, speech_role=speech_role)
+                result = self._generate_voice_clone(text, speech_role=speech_role)
             else:
                 raise ValueError(f"Unknown voice mode: {self.voice_mode}")
 
@@ -355,48 +355,6 @@ class QwenAudiobookConverter:
             payload["instruct"] = VOICE_CLONE_TITLE_INSTRUCT
 
         return self.client.predict(**payload, api_name=clone_api)
-
-    def _generate_voice_clone_stitched(self, text: str, speech_role: str = "body") -> Tuple:
-        """
-        Synthesize text with one API call per paragraph.
-
-        Paragraphs are blank-line blocks in the export chunk (headings like "Introduction—"
-        are their own paragraph when formatted with a blank line before the body).
-        The API handles punctuation-based sub-chunking via max_chunk_chars and chunk_gap.
-        """
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-        if not paragraphs:
-            paragraphs = [text.strip()]
-
-        if len(paragraphs) == 1:
-            return self._generate_voice_clone(paragraphs[0], speech_role=speech_role)
-
-        combined: AudioSegment | None = None
-        frame_rate: int | None = None
-        for index, paragraph in enumerate(paragraphs):
-            self.logger.debug(
-                f"Voice clone paragraph {index + 1}/{len(paragraphs)} "
-                f"({len(paragraph)} chars)"
-            )
-            result = self._generate_voice_clone(paragraph, speech_role=speech_role)
-            if not result or len(result) < 1:
-                raise RuntimeError("Qwen API returned invalid result")
-            audio_path = result[0]
-            if not audio_path or not Path(audio_path).exists():
-                raise RuntimeError(f"Generated audio file not found: {audio_path}")
-            paragraph_audio = AudioSegment.from_wav(str(audio_path))
-            if frame_rate is None:
-                frame_rate = paragraph_audio.frame_rate
-            if combined is not None:
-                combined += AudioSegment.silent(duration=PAUSE_PARAGRAPH_MS, frame_rate=frame_rate)
-            combined = paragraph_audio if combined is None else combined + paragraph_audio
-
-        if combined is None:
-            raise RuntimeError("No audio synthesized")
-
-        temp_path = Path("chunks") / f"_vc_{hashlib.md5(text.encode()).hexdigest()}.wav"
-        combined.export(str(temp_path), format="wav")
-        return (str(temp_path), f"{len(paragraphs)} paragraphs")
 
     def process_chunk_with_retry(self, args: Tuple[int, str, str]) -> bool:
         """Process chunk with retry logic and rate limiting"""
@@ -614,7 +572,7 @@ class QwenAudiobookConverter:
 
     def _chunk_size_words(self) -> int:
         if self.voice_mode == "voice_clone":
-            return CHUNK_SIZE_WORDS_VOICE_CLONE
+            return SYNTHESIS_MAX_WORDS
         return CHUNK_SIZE_WORDS_CUSTOM
 
     def split_into_chunks(self, text: str, *, for_section: bool = False) -> List[TextChunk]:
@@ -729,12 +687,12 @@ class QwenAudiobookConverter:
         avg_chunk_size = sum(chunk_sizes) / len(chunk_sizes) if chunk_sizes else 0
         self.logger.info(
             f"Section {section.track_number}/{total_sections} '{section.title}': "
-            f"{total_chunks} chunks (avg {avg_chunk_size:.0f} words, {pause_count} pauses)"
+            f"{total_chunks} synthesis units (avg {avg_chunk_size:.0f} words, {pause_count} pauses)"
         )
         print(
             f"\n{'=' * 50}\n"
             f"SECTION {section.track_number}/{total_sections}: {section.title}\n"
-            f"{total_chunks} TTS chunks (~{total_chunks * 4} min)\n"
+            f"{total_chunks} synthesis units (~{total_chunks * 2:.0f} min)\n"
             f"{'=' * 50}"
         )
 
