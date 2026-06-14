@@ -197,8 +197,42 @@ def split_block_into_chunks(block_text: str, max_words: int) -> list[str]:
     return [chunk for chunk in chunks if chunk.strip()]
 
 
+def merge_continuation_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Join blocks split mid-thought (lead-in lines before quotes or list examples)."""
+    if not blocks:
+        return blocks
+
+    merged: list[tuple[str, int]] = []
+    i = 0
+    while i < len(blocks):
+        text, pause = blocks[i]
+        while i + 1 < len(blocks):
+            stripped = text.rstrip()
+            if stripped.endswith((".", "!", "?", '"', "'")):
+                break
+            nxt_text, _ = blocks[i + 1]
+            nxt_stripped = nxt_text.lstrip()
+            if nxt_stripped.startswith(('"', "'", "\u201c", "\u2018")):
+                text = f"{stripped} {nxt_stripped}"
+                i += 1
+                continue
+            if stripped.endswith(":") and len(stripped.split()) <= 12:
+                text = f"{stripped} {nxt_stripped}"
+                i += 1
+                continue
+            break
+        merged.append((text, pause))
+        i += 1
+    return merged
+
+
 def split_into_tts_chunks(text: str, max_words: int, *, for_section: bool = False) -> list[TextChunk]:
-    """Split structured audiobook text into TTS chunks with pause metadata."""
+    """Split structured audiobook text into TTS chunks with pause metadata.
+
+    Structural pauses (paragraph/section blank lines) are attached only to the
+    first sub-chunk of each text block. Word-limit splits within a block never
+    receive pauses — silence is not inserted mid-paragraph.
+    """
     if for_section:
         text = prepare_section_text_for_tts(text)
 
@@ -299,6 +333,7 @@ def prepare_section_text_for_tts(section_text: str) -> str:
     blocks = parse_text_blocks(section_text)
     if not blocks:
         return section_text
+    blocks = merge_continuation_blocks(blocks)
     return blocks_to_text(blocks)
 
 

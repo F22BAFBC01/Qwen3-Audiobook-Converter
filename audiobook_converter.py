@@ -79,8 +79,8 @@ CUSTOM_VOICE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 VOICE_CLONE_LANGUAGE = "English"
 VOICE_CLONE_USE_XVECTOR_ONLY = False
 VOICE_CLONE_MODEL_SIZE = "1.7B"  # Always use 1.7B
-VOICE_CLONE_MAX_CHUNK_CHARS = 200
-VOICE_CLONE_CHUNK_GAP = 0.25  # seconds between internal voice-clone sub-chunks
+VOICE_CLONE_MAX_CHUNK_CHARS = 2500  # Fit typical paragraphs; avoid mid-sentence API splits
+VOICE_CLONE_CHUNK_GAP = 0  # No silence between internal voice-clone sub-chunks
 VOICE_CLONE_SEED = -1
 # Used only if the Gradio voice-clone endpoint exposes an instruct parameter (Base model usually does not).
 VOICE_CLONE_TITLE_INSTRUCT = CUSTOM_VOICE_TITLE_INSTRUCT
