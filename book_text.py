@@ -297,7 +297,7 @@ def is_attachable_heading(text: str, pause_before_ms: int = 0) -> bool:
 
 
 def merge_heading_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
-    """Attach headings and subheadings to the following body using quoted prefixes."""
+    """Attach headings on their own line before the body (quoted em-dash title, then blank line)."""
     if not blocks:
         return blocks
 
@@ -307,7 +307,9 @@ def merge_heading_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]
         text, pause = blocks[i]
         if is_attachable_heading(text, pause) and i + 1 < len(blocks):
             nxt_text, _ = blocks[i + 1]
-            merged.append((f"{format_heading_for_tts(text)} {nxt_text.lstrip()}", pause))
+            merged.append(
+                (f"{format_heading_for_tts(text)}\n\n{nxt_text.lstrip()}", pause)
+            )
             i += 2
         else:
             merged.append((text, pause))
