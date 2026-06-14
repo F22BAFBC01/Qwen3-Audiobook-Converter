@@ -50,7 +50,6 @@ QUESTION_PREFIX_RE = re.compile(r"(?i)^question:\s*(.+)$")
 class TextChunk:
     text: str
     pause_before_ms: int = 0
-    speech_role: str = "body"  # "body" or "section_title"
 
 
 @dataclass(frozen=True)
@@ -424,7 +423,6 @@ def split_into_tts_chunks(
                     TextChunk(
                         text=sub_text,
                         pause_before_ms=pause_ms if sub_index == 0 else 0,
-                        speech_role="body",
                     )
                 )
             continue
@@ -433,7 +431,6 @@ def split_into_tts_chunks(
             TextChunk(
                 text=unit_text,
                 pause_before_ms=pause_ms,
-                speech_role="body",
             )
         )
 
