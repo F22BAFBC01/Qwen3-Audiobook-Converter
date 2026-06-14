@@ -374,6 +374,9 @@ def looks_like_faq_question(line: str) -> bool:
         return False
     if is_dialogue_line(line):
         return False
+    # Chapter/part titles often end with "?" in this publisher's EPUBs — not FAQ prompts.
+    if is_major_section(line.rstrip("?").rstrip(".")):
+        return False
     return len(line.split()) >= 4
 
 

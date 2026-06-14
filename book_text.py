@@ -43,6 +43,8 @@ CHAPTER_TITLE_RE = re.compile(
     r"(?i)^(?:part\s+\d+\s*:?\s*.+|chapter\s+\d+[:.]?\s*.+)$"
 )
 
+QUESTION_PREFIX_RE = re.compile(r"(?i)^question:\s*(.+)$")
+
 
 @dataclass(frozen=True)
 class TextChunk:
@@ -435,10 +437,21 @@ def is_toc_artifact(text: str) -> bool:
     return False
 
 
+def _section_title_line(text: str) -> str:
+    """First line of a block, stripping mistaken FAQ prefix from chapter headings."""
+    line = _first_line(text)
+    match = QUESTION_PREFIX_RE.match(line)
+    if match:
+        return match.group(1).strip()
+    return line
+
+
 def is_section_title(text: str) -> bool:
     """True when a text block begins a new audiobook track (chapter or equivalent)."""
-    line = _first_line(text)
-    if not line or line.lower().startswith("question:"):
+    line = _section_title_line(text)
+    if not line:
+        return False
+    if line.lower().startswith("question:"):
         return False
     if is_toc_artifact(text):
         return False
@@ -459,7 +472,7 @@ def is_section_title(text: str) -> bool:
 
 
 def extract_section_title(text: str) -> str:
-    line = _first_line(text).rstrip(".")
+    line = _section_title_line(text).rstrip(".?")
     return line or "Section"
 
 

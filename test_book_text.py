@@ -9,8 +9,10 @@ from book_text import (
     PAUSE_SECTION_MS,
     SYNTHESIS_MAX_WORDS,
     blocks_to_text,
+    extract_section_title,
     format_heading_for_tts,
     group_blocks_for_synthesis,
+    is_section_title,
     merge_continuation_blocks,
     merge_heading_blocks,
     parse_text_blocks,
@@ -85,6 +87,19 @@ def test_audiobook_sections():
         print(f"  {section.track_number:02d} {section.filename} ({len(section.text.split())} words)")
 
 
+def test_chapter_titles_with_question_mark_are_sections():
+    from book_format import looks_like_faq_question
+
+    title = "Chapter 1. What the Heck Are Boundaries?"
+    assert not looks_like_faq_question(title)
+    assert is_section_title(title)
+    assert extract_section_title(title) == "Chapter 1. What the Heck Are Boundaries"
+
+    faq = "Question: Chapter 1. What the Heck Are Boundaries?"
+    assert is_section_title(faq)
+    assert extract_section_title(faq) == "Chapter 1. What the Heck Are Boundaries"
+
+
 def test_structured_epub_matches_audiobook_sample():
     """General EPUB extraction should produce a sensible section split for Tawwab."""
     epub_candidates = list(Path(__file__).resolve().parent.glob("book_to_convert/*.epub"))
@@ -105,6 +120,10 @@ def test_structured_epub_matches_audiobook_sample():
 
     sections = split_into_audiobook_sections(formatted)
     assert sections[0].title == "Preface", sections[0].title
+    titles = [s.title for s in sections]
+    assert any(t.startswith("Chapter 1.") for t in titles), titles
+    assert any(t.startswith("Chapter 3.") for t in titles), titles
+    assert any(t.startswith("Chapter 9.") for t in titles), titles
     assert all(s.title != "Opening" for s in sections)
     assert all(
         s.title not in {"Commonly Asked Questions", "Self-Assessment Quiz"} for s in sections
@@ -235,6 +254,7 @@ if __name__ == "__main__":
     test_format_heading_for_tts()
     test_merge_continuation_blocks()
     test_heading_merged_into_body()
+    test_chapter_titles_with_question_mark_are_sections()
     test_split_text_for_voice_clone()
     test_word_limit_splits_have_no_mid_paragraph_pause()
     test_formatted_audiobook_sample()
