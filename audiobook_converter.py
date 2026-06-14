@@ -97,9 +97,15 @@ except ImportError:
 class QwenAudiobookConverter:
     """Audiobook converter using Qwen Voice API"""
 
-    def __init__(self, voice_mode: str = "custom_voice", voice_clone_ref_audio: Optional[str] = None):
+    def __init__(
+        self,
+        voice_mode: str = "custom_voice",
+        voice_clone_ref_audio: Optional[str] = None,
+        voice_clone_ref_transcript: Optional[str] = None,
+    ):
         self.voice_mode = voice_mode
         self.voice_clone_ref_audio = voice_clone_ref_audio
+        self.voice_clone_ref_transcript = voice_clone_ref_transcript
         self.voice_clone_ref_text = ""
         self.setup_logging()
         self.setup_directories()
@@ -126,6 +132,20 @@ class QwenAudiobookConverter:
         directories = [BOOKS_FOLDER, AUDIOBOOKS_FOLDER, "chunks", "cache/audio_chunks", "logs"]
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
+
+    def load_transcript(self, transcript_path: str) -> str:
+        """Load transcript text from a file (any extension, treated as plain text)."""
+        path = Path(transcript_path)
+        for encoding in ['utf-8', 'utf-16', 'latin-1', 'cp1252']:
+            try:
+                with open(path, 'r', encoding=encoding) as f:
+                    text = f.read().strip()
+                if text:
+                    return text
+                raise ValueError("Transcript file is empty")
+            except UnicodeDecodeError:
+                continue
+        raise ValueError(f"Could not decode transcript file: {transcript_path}")
 
     def transcribe_audio(self, audio_path: str) -> str:
         """Transcribe audio file using Qwen's Whisper transcription"""
@@ -156,9 +176,11 @@ class QwenAudiobookConverter:
                 print("[ERROR] Configuration Error!")
                 print(f"Reference audio file not found: {self.voice_clone_ref_audio}")
                 sys.exit(1)
-            
-            # Transcribe the audio if client is available (will be done after init)
-            # For now, we'll transcribe it in init_qwen_client if needed
+
+            if self.voice_clone_ref_transcript and not Path(self.voice_clone_ref_transcript).exists():
+                print("[ERROR] Configuration Error!")
+                print(f"Transcript file not found: {self.voice_clone_ref_transcript}")
+                sys.exit(1)
 
     def init_qwen_client(self):
         """Initialize Qwen Gradio client"""
@@ -176,11 +198,16 @@ class QwenAudiobookConverter:
             self.logger.info("Connected to Qwen API")
             print("[OK] Connected to Qwen API")
             
-            # If voice clone mode, transcribe the reference audio
+            # If voice clone mode, load or transcribe reference text for voice cloning
             if self.voice_mode == "voice_clone" and self.voice_clone_ref_audio:
-                print("[INFO] Transcribing reference audio for voice cloning...")
-                self.voice_clone_ref_text = self.transcribe_audio(self.voice_clone_ref_audio)
-                print(f"[OK] Transcription: {self.voice_clone_ref_text[:100]}...")
+                if self.voice_clone_ref_transcript:
+                    print(f"[INFO] Using transcript from file: {self.voice_clone_ref_transcript}")
+                    self.voice_clone_ref_text = self.load_transcript(self.voice_clone_ref_transcript)
+                    print(f"[OK] Loaded transcript: {self.voice_clone_ref_text[:100]}...")
+                else:
+                    print("[INFO] Transcribing reference audio for voice cloning...")
+                    self.voice_clone_ref_text = self.transcribe_audio(self.voice_clone_ref_audio)
+                    print(f"[OK] Transcription: {self.voice_clone_ref_text[:100]}...")
         except Exception as e:
             print("[ERROR] Qwen API initialization failed!")
             print(f"API endpoint: {QWEN_API_URL}")
@@ -729,6 +756,10 @@ class QwenAudiobookConverter:
             print(f"Language: {CUSTOM_VOICE_LANGUAGE}")
         elif self.voice_mode == "voice_clone":
             print(f"Reference audio: {Path(self.voice_clone_ref_audio).name}")
+            if self.voice_clone_ref_transcript:
+                print(f"Reference transcript: {Path(self.voice_clone_ref_transcript).name}")
+            else:
+                print("Reference transcript: (auto-transcribed from audio)")
             print(f"Language: {VOICE_CLONE_LANGUAGE}")
         print(f"Output format: {AUDIO_FORMAT}")
         print(f"Max workers: {MAX_WORKERS}")
@@ -801,8 +832,11 @@ Examples:
   # Use custom voice (default - Ryan speaker)
   python audiobook_converter.py
 
-  # Use voice cloning with reference audio
+  # Use voice cloning with reference audio (auto-transcribed)
   python audiobook_converter.py --voice-clone --voice-sample path/to/reference.wav
+
+  # Use voice cloning with a pre-made transcript (skips API transcription)
+  python audiobook_converter.py --voice-clone --voice-sample path/to/reference.wav --transcript path/to/transcript.txt
         """
     )
     
@@ -815,10 +849,21 @@ Examples:
     parser.add_argument(
         "--voice-sample",
         type=str,
-        help="Path to reference audio file for voice cloning (WAV format). Audio will be automatically transcribed."
+        help="Path to reference audio file for voice cloning (WAV format). Audio will be automatically transcribed unless --transcript is provided."
+    )
+
+    parser.add_argument(
+        "--transcript",
+        type=str,
+        help="Path to a text file containing the transcript of the reference audio. Skips automatic transcription. Any file extension is accepted."
     )
     
     args = parser.parse_args()
+
+    if args.transcript and not args.voice_clone:
+        print("[ERROR] --transcript requires --voice-clone")
+        print("Usage: python audiobook_converter.py --voice-clone --voice-sample <path> --transcript <path>")
+        sys.exit(1)
     
     # Determine voice mode
     if args.voice_clone:
@@ -835,7 +880,8 @@ Examples:
     try:
         converter = QwenAudiobookConverter(
             voice_mode=voice_mode,
-            voice_clone_ref_audio=voice_clone_ref_audio
+            voice_clone_ref_audio=voice_clone_ref_audio,
+            voice_clone_ref_transcript=args.transcript,
         )
         converter.run()
     except KeyboardInterrupt:
