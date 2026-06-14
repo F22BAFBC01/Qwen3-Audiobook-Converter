@@ -35,6 +35,7 @@ from book_text import (
     clean_text_preserve_structure,
     split_into_audiobook_sections,
     split_into_tts_chunks,
+    split_text_for_voice_clone,
 )
 from mp3_tags import tag_audiobook_section
 from book_format import format_epub_if_supported
@@ -79,7 +80,7 @@ CUSTOM_VOICE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 VOICE_CLONE_LANGUAGE = "English"
 VOICE_CLONE_USE_XVECTOR_ONLY = False
 VOICE_CLONE_MODEL_SIZE = "1.7B"  # Always use 1.7B
-VOICE_CLONE_MAX_CHUNK_CHARS = 2500  # Fit typical paragraphs; avoid mid-sentence API splits
+VOICE_CLONE_MAX_CHUNK_CHARS = 500  # Gradio voice-clone API maximum
 VOICE_CLONE_CHUNK_GAP = 0  # No silence between internal voice-clone sub-chunks
 VOICE_CLONE_SEED = -1
 # Used only if the Gradio voice-clone endpoint exposes an instruct parameter (Base model usually does not).
@@ -277,7 +278,7 @@ class QwenAudiobookConverter:
             if self.voice_mode == "custom_voice":
                 result = self._generate_custom_voice(text, speech_role=speech_role)
             elif self.voice_mode == "voice_clone":
-                result = self._generate_voice_clone(text, speech_role=speech_role)
+                result = self._generate_voice_clone_stitched(text, speech_role=speech_role)
             else:
                 raise ValueError(f"Unknown voice mode: {self.voice_mode}")
 
@@ -352,6 +353,28 @@ class QwenAudiobookConverter:
             payload["instruct"] = VOICE_CLONE_TITLE_INSTRUCT
 
         return self.client.predict(**payload, api_name=clone_api)
+
+    def _generate_voice_clone_stitched(self, text: str, speech_role: str = "body") -> Tuple:
+        """Generate voice-clone audio, splitting at sentence boundaries when over API char limit."""
+        segments = split_text_for_voice_clone(text, VOICE_CLONE_MAX_CHUNK_CHARS)
+        if not segments:
+            raise RuntimeError("No text to synthesize")
+        if len(segments) == 1:
+            return self._generate_voice_clone(segments[0], speech_role=speech_role)
+
+        combined = AudioSegment.empty()
+        for segment in segments:
+            result = self._generate_voice_clone(segment, speech_role=speech_role)
+            if not result or len(result) < 1:
+                raise RuntimeError("Qwen API returned invalid result")
+            audio_path = result[0]
+            if not audio_path or not Path(audio_path).exists():
+                raise RuntimeError(f"Generated audio file not found: {audio_path}")
+            combined += AudioSegment.from_wav(str(audio_path))
+
+        temp_path = Path("chunks") / f"_vc_stitch_{hashlib.md5(text.encode()).hexdigest()}.wav"
+        combined.export(str(temp_path), format="wav")
+        return (str(temp_path), f"stitched {len(segments)} segments")
 
     def process_chunk_with_retry(self, args: Tuple[int, str, str]) -> bool:
         """Process chunk with retry logic and rate limiting"""

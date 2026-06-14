@@ -36,7 +36,7 @@ VOICE_CLONE_REF_TEXT = ""  # Text matching what's spoken in the reference audio
 VOICE_CLONE_LANGUAGE = "Auto"
 VOICE_CLONE_USE_XVECTOR_ONLY = False  # True for lower quality but faster (no text needed)
 VOICE_CLONE_MODEL_SIZE = "1.7B"  # 0.6B or 1.7B
-VOICE_CLONE_MAX_CHUNK_CHARS = 200  # Maximum characters per chunk
+VOICE_CLONE_MAX_CHUNK_CHARS = 500  # Gradio voice-clone API maximum
 VOICE_CLONE_CHUNK_GAP = 0  # Gap between chunks in seconds
 VOICE_CLONE_SEED = -1  # -1 for auto
 

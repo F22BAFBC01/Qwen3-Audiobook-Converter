@@ -197,6 +197,55 @@ def split_block_into_chunks(block_text: str, max_words: int) -> list[str]:
     return [chunk for chunk in chunks if chunk.strip()]
 
 
+def split_text_for_voice_clone(text: str, max_chars: int) -> list[str]:
+    """Split text at sentence boundaries to fit voice-clone API character limits."""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    sentences = re.split(r"(?<=[.!?])\s+", normalized)
+    chunks: list[str] = []
+    current = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        if len(sentence) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            words = sentence.split()
+            part = ""
+            for word in words:
+                candidate = f"{part} {word}".strip()
+                if len(candidate) <= max_chars:
+                    part = candidate
+                else:
+                    if part:
+                        chunks.append(part)
+                    part = word
+            if part:
+                current = part
+            continue
+
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = sentence
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
 def merge_continuation_blocks(blocks: list[tuple[str, int]]) -> list[tuple[str, int]]:
     """Join blocks split mid-thought (lead-in lines before quotes or list examples)."""
     if not blocks:

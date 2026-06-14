@@ -13,6 +13,7 @@ from book_text import (
     split_block_into_chunks,
     split_into_audiobook_sections,
     split_into_tts_chunks,
+    split_text_for_voice_clone,
 )
 
 
@@ -118,6 +119,20 @@ def test_blocks_to_text_roundtrip():
     assert roundtrip[1][1] == PAUSE_PARAGRAPH_MS
 
 
+def test_split_text_for_voice_clone():
+    paragraph = (
+        "My life before I had healthy boundaries was overwhelming and chaotic. "
+        "I, too, have struggled with codependency, peace in life and at work, "
+        "and unfulfilling relationships. But setting expectations and limits "
+        "helped me find balance."
+    )
+    segments = split_text_for_voice_clone(paragraph, max_chars=500)
+    assert segments
+    assert all(len(segment) <= 500 for segment in segments)
+    assert " ".join(segments) == paragraph
+    assert len(segments) >= 1
+
+
 def test_word_limit_splits_have_no_mid_paragraph_pause():
     """Word-limit sub-chunks within one block must not receive structural pauses."""
     paragraph = " ".join(["This is sentence number %d." % i for i in range(1, 80)])
@@ -178,6 +193,7 @@ if __name__ == "__main__":
     test_blank_line_pauses()
     test_blocks_to_text_roundtrip()
     test_merge_continuation_blocks()
+    test_split_text_for_voice_clone()
     test_word_limit_splits_have_no_mid_paragraph_pause()
     test_formatted_audiobook_sample()
     test_audiobook_sections()
