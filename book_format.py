@@ -369,17 +369,6 @@ def format_checklist_block(lines: list[str], start: int) -> tuple[str, int]:
     return " ".join(items), i - 1
 
 
-def looks_like_faq_question(line: str) -> bool:
-    if not line.endswith("?"):
-        return False
-    if is_dialogue_line(line):
-        return False
-    # Chapter/part titles often end with "?" in this publisher's EPUBs — not FAQ prompts.
-    if is_major_section(line.rstrip("?").rstrip(".")):
-        return False
-    return len(line.split()) >= 4
-
-
 def process_lines(source_lines: list[SourceLine]) -> list[str]:
     lines = [entry.text for entry in source_lines]
     skip_indices: set[int] = set()
@@ -448,13 +437,6 @@ def process_lines(source_lines: list[SourceLine]) -> list[str]:
                     output.append("")
                     i = end + 1
                     continue
-
-        if looks_like_faq_question(line):
-            append_pause(output, SECTION_PAUSE)
-            output.append(f"Question: {line}")
-            output.append("")
-            i += 1
-            continue
 
         if is_likely_heading(line):
             emit_heading(output, line)

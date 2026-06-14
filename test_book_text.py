@@ -89,10 +89,7 @@ def test_audiobook_sections():
 
 
 def test_chapter_titles_with_question_mark_are_sections():
-    from book_format import looks_like_faq_question
-
     title = "Chapter 1. What the Heck Are Boundaries?"
-    assert not looks_like_faq_question(title)
     assert is_section_title(title)
     assert extract_section_title(title) == "Chapter 1. What the Heck Are Boundaries"
 
