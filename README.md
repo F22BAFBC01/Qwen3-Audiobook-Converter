@@ -7,9 +7,12 @@
 > **What changed in this fork (high level):**
 >
 > - **Audiobook-oriented text handling** — preserves paragraph/chapter blank lines and inserts silence at those boundaries (instead of flattening all whitespace).
-> - **One MP3 per section** — ACX-style numbered chapter files in `audiobooks/<book title>/`, with ID3 track metadata (`mutagen`).
-> - **Structured EPUB extraction** — general-purpose semantic parsing for EPUBs (spine order, HTML roles/classes) to skip blurbs, TOC noise, and back matter; falls back to plain HTML extraction if needed.
-> - **Smaller TTS chunks** for voice clone, title/section delivery tweaks, and narration `instruct` strings for custom voice mode.
+> - **One MP3 per section** — ACX-style numbered chapter files in `audiobooks/<book title>/`, with ID3 track metadata (`mutagen`). Re-runs **resume** by skipping sections whose MP3 already exists.
+> - **Structured EPUB extraction** — general-purpose semantic parsing (spine order, HTML roles/classes) to skip blurbs, TOC noise, and back matter; falls back to plain HTML extraction if needed. Chapter titles ending in `?` are detected correctly (not misclassified as FAQ).
+> - **Voice-clone chunking** — groups text into **synthesis units** (coherent passages by subsection structure, not one call per paragraph or fixed word batch). The Gradio API still splits each unit internally at punctuation (~500 chars).
+> - **Custom-voice chunking** — ~**1750 characters** per API call (sentence boundaries), sized to stay within model input limits.
+> - **Heading format for TTS** — section/subsection headings on their own line with blank-line spacing (no quoted em-dash wrappers).
+> - **API text diagnostics** — writes each synthesis unit to `diagnostic/` before the Gradio call (folder cleared at run start; kept on failure/interrupt).
 > - **New modules:** `book_text.py`, `book_format.py`, `mp3_tags.py`.
 >
 > If something breaks, compare against upstream or [open an issue](https://github.com/F22BAFBC01/Qwen3-Audiobook-Converter/issues) on this fork. For the original behavior, use the upstream repo.
