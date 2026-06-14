@@ -29,6 +29,8 @@ from pydub import AudioSegment
 from pydub.exceptions import CouldntDecodeError
 from gradio_client import Client, handle_file
 
+from book_text import TextChunk, clean_text_preserve_structure, split_into_tts_chunks
+
 # Fix Windows console encoding for emoji/unicode
 if sys.platform == 'win32':
     try:
@@ -62,13 +64,14 @@ VOICE_CLONE_LANGUAGE = "English"
 VOICE_CLONE_USE_XVECTOR_ONLY = False
 VOICE_CLONE_MODEL_SIZE = "1.7B"  # Always use 1.7B
 VOICE_CLONE_MAX_CHUNK_CHARS = 200
-VOICE_CLONE_CHUNK_GAP = 0
+VOICE_CLONE_CHUNK_GAP = 0.25  # seconds between internal voice-clone sub-chunks
 VOICE_CLONE_SEED = -1
 
 # Processing Settings
 BOOKS_FOLDER = "book_to_convert"  # Input folder
 AUDIOBOOKS_FOLDER = "audiobooks"  # Output folder
-CHUNK_SIZE_WORDS = 1500  # Increased to reduce number of chunks and speed up processing
+CHUNK_SIZE_WORDS_CUSTOM = 600  # Smaller chunks keep Qwen3 pauses natural
+CHUNK_SIZE_WORDS_VOICE_CLONE = 300  # Voice clone compresses pauses on long inputs
 MAX_WORKERS = 1  # Keep at 1 to avoid rate limiting
 AUDIO_FORMAT = "mp3"
 AUDIO_BITRATE = "128k"
@@ -428,29 +431,37 @@ class QwenAudiobookConverter:
         return '\n\n'.join(text_parts)
 
     def _clean_html(self, html_content: str) -> str:
-        """Clean HTML content"""
+        """Clean HTML content while preserving paragraph breaks."""
         if not html_content:
             return ""
 
         if BS4_AVAILABLE:
             try:
                 soup = BeautifulSoup(html_content, 'html.parser')
-                for script in soup(["script", "style"]):
-                    script.decompose()
+                for tag in soup(["script", "style"]):
+                    tag.decompose()
+                for br in soup.find_all("br"):
+                    br.replace_with("\n")
+                block_tags = [
+                    "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+                    "blockquote", "section", "article",
+                ]
+                for tag in soup.find_all(block_tags):
+                    if tag.string is None and tag.get_text(strip=True):
+                        tag.append("\n\n")
                 text = soup.get_text()
-                lines = (line.strip() for line in text.splitlines())
-                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                return ' '.join(chunk for chunk in chunks if chunk)
+                return clean_text_preserve_structure(text)
             except Exception:
                 pass
 
         # Fallback regex cleaning
         html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
         html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<br\s*/?>', '\n', html_content, flags=re.IGNORECASE)
+        html_content = re.sub(r'</(p|div|li|h[1-6])>', '\n\n', html_content, flags=re.IGNORECASE)
         html_content = re.sub(r'<[^>]+>', ' ', html_content)
         html_content = unescape(html_content)
-        html_content = re.sub(r'\s+', ' ', html_content)
-        return html_content.strip()
+        return clean_text_preserve_structure(html_content)
 
     def extract_text_from_file(self, file_path: Path) -> str:
         """Extract text from various file formats"""
@@ -470,11 +481,11 @@ class QwenAudiobookConverter:
             raise ValueError(f"Unsupported file format: {extension}")
 
     def _extract_txt(self, file_path: Path) -> str:
-        """Extract from TXT with encoding detection"""
+        """Extract from TXT with encoding detection, preserving paragraph breaks."""
         for encoding in ['utf-8', 'utf-16', 'latin-1', 'cp1252']:
             try:
                 with open(file_path, 'r', encoding=encoding) as f:
-                    return self._clean_text(f.read())
+                    return clean_text_preserve_structure(f.read())
             except UnicodeDecodeError:
                 continue
         raise ValueError("Could not decode text file")
@@ -499,75 +510,37 @@ class QwenAudiobookConverter:
                     continue
             
             self.logger.info(f"Extracted text from {total_pages} pages, {len(text)} characters total")
-        return self._clean_text(text)
+        return clean_text_preserve_structure(text)
 
     def _extract_docx(self, file_path: Path) -> str:
         """Extract from DOCX"""
         doc = Document(file_path)
         text = '\n\n'.join([para.text for para in doc.paragraphs if para.text.strip()])
-        return self._clean_text(text)
+        return clean_text_preserve_structure(text)
 
     def _extract_doc(self, file_path: Path) -> str:
         """Extract from DOC"""
         text = docx2txt.process(str(file_path))
-        return self._clean_text(text) if text else ""
+        return clean_text_preserve_structure(text) if text else ""
 
-    def _clean_text(self, text: str) -> str:
-        """Clean and normalize text"""
-        if not text:
-            return ""
-        text = re.sub(r'\s+', ' ', text)
-        text = text.replace('\n', ' ')
-        text = re.sub(r'\b\d{1,3}\b(?=\s|$)', '', text)
-        return text.strip()
+    def _chunk_size_words(self) -> int:
+        if self.voice_mode == "voice_clone":
+            return CHUNK_SIZE_WORDS_VOICE_CLONE
+        return CHUNK_SIZE_WORDS_CUSTOM
 
-    def split_into_chunks(self, text: str) -> List[str]:
-        """Split text into manageable chunks"""
+    def split_into_chunks(self, text: str) -> List[TextChunk]:
+        """Split structured text into TTS chunks with pause metadata."""
         if not text.strip():
             return []
+        return split_into_tts_chunks(text, max_words=self._chunk_size_words())
 
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        chunks = []
-        current_chunk = ""
-        current_words = 0
-
-        for sentence in sentences:
-            sentence_words = len(sentence.split())
-
-            if sentence_words > CHUNK_SIZE_WORDS:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = ""
-                    current_words = 0
-
-                # Split long sentences
-                parts = re.split(r'[,;:]', sentence)
-                for part in parts:
-                    part_words = len(part.split())
-                    if current_words + part_words <= CHUNK_SIZE_WORDS:
-                        current_chunk += part + " "
-                        current_words += part_words
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk.strip())
-                        current_chunk = part + " "
-                        current_words = part_words
-            else:
-                if current_words + sentence_words <= CHUNK_SIZE_WORDS:
-                    current_chunk += sentence + " "
-                    current_words += sentence_words
-                else:
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                    current_chunk = sentence + " "
-                    current_words = sentence_words
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return [chunk for chunk in chunks if chunk.strip()]
-
-    def combine_chunks(self, total_chunks: int, output_path: Path, results: Optional[Dict[int, bool]] = None) -> bool:
+    def combine_chunks(
+        self,
+        total_chunks: int,
+        output_path: Path,
+        results: Optional[Dict[int, bool]] = None,
+        chunk_pauses: Optional[List[int]] = None,
+    ) -> bool:
         """Combine audio chunks into final audiobook"""
         try:
             combined = AudioSegment.empty()
@@ -583,6 +556,11 @@ class QwenAudiobookConverter:
                 chunk_file = Path("chunks") / f"chunk_{i:04d}.wav"
                 if chunk_file.exists():
                     try:
+                        pause_ms = 0
+                        if chunk_pauses and i - 1 < len(chunk_pauses):
+                            pause_ms = chunk_pauses[i - 1]
+                        if pause_ms > 0:
+                            combined += AudioSegment.silent(duration=pause_ms)
                         chunk_audio = AudioSegment.from_wav(str(chunk_file))
                         combined += chunk_audio
                         successful += 1
@@ -658,7 +636,7 @@ class QwenAudiobookConverter:
 
             self.logger.info(f"Extracted {len(text)} characters ({len(text.split())} words)")
 
-            # Split into chunks
+            # Split into chunks (respects blank-line pauses in formatted audiobook text)
             chunks = self.split_into_chunks(text)
             total_chunks = len(chunks)
             if total_chunks == 0:
@@ -666,14 +644,20 @@ class QwenAudiobookConverter:
                 return False
 
             # Log chunk info
-            chunk_sizes = [len(chunk.split()) for chunk in chunks]
+            chunk_sizes = [len(chunk.text.split()) for chunk in chunks]
+            pause_count = sum(1 for chunk in chunks if chunk.pause_before_ms > 0)
             avg_chunk_size = sum(chunk_sizes) / len(chunk_sizes) if chunk_sizes else 0
-            self.logger.info(f"Split into {total_chunks} chunks (avg {avg_chunk_size:.0f} words per chunk)")
+            self.logger.info(
+                f"Split into {total_chunks} chunks (avg {avg_chunk_size:.0f} words, "
+                f"{pause_count} pauses from paragraph/section breaks)"
+            )
             print(f"[INFO] Processing {total_chunks} chunks via Qwen API...")
+            print(f"[INFO] {pause_count} structural pauses will be inserted between sections")
             print(f"[INFO] Estimated time: ~{total_chunks * 4} minutes (4 min per chunk)")
 
             # Process chunks - process in order to ensure correct naming
-            chunk_args = [(i + 1, chunk) for i, chunk in enumerate(chunks)]
+            chunk_args = [(i + 1, chunk.text) for i, chunk in enumerate(chunks)]
+            chunk_pauses = [chunk.pause_before_ms for chunk in chunks]
 
             print(f"\n{'=' * 50}")
             print(f"PROCESSING {total_chunks} CHUNKS")
@@ -718,7 +702,7 @@ class QwenAudiobookConverter:
 
             # Combine chunks (only the successful ones)
             output_path = Path(AUDIOBOOKS_FOLDER) / f"{file_path.stem}.{AUDIO_FORMAT}"
-            success = self.combine_chunks(total_chunks, output_path, results)
+            success = self.combine_chunks(total_chunks, output_path, results, chunk_pauses)
 
             if success:
                 duration = time.time() - start_time
