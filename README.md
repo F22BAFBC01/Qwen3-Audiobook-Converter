@@ -75,6 +75,9 @@ No it's not broken, it's a raw mp3 file download it and play it, you can't embed
 
    # Voice Clone mode with automatic transcription
    python audiobook_converter.py --voice-clone --voice-sample path/to/reference.wav
+
+   # Voice Clone mode with manual transcription
+   python audiobook_converter.py --voice-clone --voice-sample path/to/reference.wav --transcript path/to/transcript.txt
    ```
 
 ## 📋 Requirements
