@@ -31,6 +31,7 @@ from gradio_client import Client, handle_file
 
 from book_text import (
     AudiobookSection,
+    SYNTHESIS_MAX_CHARS,
     SYNTHESIS_MAX_WORDS,
     TextChunk,
     clean_text_preserve_structure,
